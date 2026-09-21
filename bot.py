@@ -317,6 +317,7 @@ def main():
     logger.info("Daily report: %02d:%02d", REPORT_HOUR, REPORT_MINUTE)
 
     # One Render service / one polling process must use this bot token.
+    asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling(drop_pending_updates=True)
 
 
