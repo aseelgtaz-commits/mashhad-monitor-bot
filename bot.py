@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -157,8 +158,11 @@ def main():
 
     print("Bot is running...")
 
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     app.run_polling()
 
 
-if __name__== "__main__":
+if __name__ == "__main__":
     main()
+
