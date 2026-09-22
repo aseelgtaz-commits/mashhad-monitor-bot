@@ -132,7 +132,6 @@ async def handle_button_clicks(
   if not query:
     return
 
-  # إجابة تليجرام فوراً لإخفاء أيقونة التحميل على الزر
   try:
     await query.answer()
   except Exception as e:
@@ -240,7 +239,6 @@ async def handle_button_clicks(
 
   except Exception as e:
     logger.error(f"General button handler error: {e}")
-    # في حال حدوث أي خطأ غير متوقع، إرسال هذه الرسالة وتجنب التجمد
     try:
       await query.edit_message_text(
           "⚠️ حدث خطأ أثناء تنفيذ الطلب، يرجى المحاولة مرة أخرى.",
@@ -284,11 +282,9 @@ def main():
   scheduler.start()
 
   logger.info("تم تشغيل البوت بنجاح...")
-  app.run_polling()
 
-
-if __name__ == "__main__":
-  main()
+  # مسح أي جلسات قديمة متراكمة تجنباً للـ Conflict
+  app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
