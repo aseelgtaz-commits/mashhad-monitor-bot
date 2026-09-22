@@ -1,264 +1,110 @@
-import html
-import os
-import re
-from collections import Counter
-from datetime import datetime
+import logging
 from pathlib import Path
-from tempfile import gettempdir
-from zoneinfo import ZoneInfo
-
+from datetime import datetime
 from docx import Document
-from docx.enum.section import WD_SECTION
-from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
+logger=logging.getLogger(__name__)
 
-ARABIC_FONT = "Arial"
+def rtl(p):
+    p.alignment=WD_ALIGN_PARAGRAPH.RIGHT
+    pPr=p._p.get_or_add_pPr()
+    pPr.append(OxmlElement("w:bidi"))
 
+def cell(cell,text,bold=False):
+    cell.text=""
+    p=cell.paragraphs[0]; rtl(p)
+    r=p.add_run(str(text or "")); r.font.name="Arial"; r.font.size=Pt(10); r.bold=bold
+    cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
-def _set_cell_shading(cell, fill="EAF2F8"):
-    tc_pr = cell._tc.get_or_add_tcPr()
-    shd = tc_pr.find(qn("w:shd"))
-    if shd is None:
-        shd = OxmlElement("w:shd")
-        tc_pr.append(shd)
-    shd.set(qn("w:fill"), fill)
+def shade(cell,fill="D9EAF7"):
+    tcPr=cell._tc.get_or_add_tcPr(); shd=OxmlElement("w:shd")
+    shd.set(qn("w:fill"),fill); tcPr.append(shd)
 
+def page_number(p):
+    r=p.add_run()
+    a=OxmlElement("w:fldChar"); a.set(qn("w:fldCharType"),"begin")
+    b=OxmlElement("w:instrText"); b.set(qn("xml:space"),"preserve"); b.text="PAGE"
+    c=OxmlElement("w:fldChar"); c.set(qn("w:fldCharType"),"end")
+    r._r.extend([a,b,c])
 
-def _set_cell_text_direction(cell, rtl=True):
-    tc_pr = cell._tc.get_or_add_tcPr()
-    bidi = tc_pr.find(qn("w:bidi"))
-    if bidi is None:
-        bidi = OxmlElement("w:bidi")
-        tc_pr.append(bidi)
-    bidi.set(qn("w:val"), "1" if rtl else "0")
+def hyperlink(p,url,text):
+    if not url: p.add_run(text); return
+    rid=p.part.relate_to(url,"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",is_external=True)
+    h=OxmlElement("w:hyperlink"); h.set(qn("r:id"),rid)
+    r=OxmlElement("w:r"); t=OxmlElement("w:t"); t.text=text; r.append(t); h.append(r); p._p.append(h)
 
+def create_daily_report(items,sources,output_dir="reports",now=None):
+    now=now or datetime.now()
+    out=Path(output_dir); out.mkdir(parents=True,exist_ok=True)
+    path=out/f"تقرير_رصد_المهرة_{now:%Y-%m-%d}.docx"
+    doc=Document()
+    for s in doc.sections:
+        s.top_margin=Cm(2); s.bottom_margin=Cm(1.8); s.left_margin=Cm(1.8); s.right_margin=Cm(1.8)
+        f=s.footer.paragraphs[0]; f.alignment=WD_ALIGN_PARAGRAPH.CENTER
+        rr=f.add_run("تقرير رصد المهرة | صفحة "); rr.font.name="Arial"; rr.font.size=Pt(8); page_number(f)
 
-def _set_paragraph_rtl(paragraph):
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    p = paragraph._p
-    pPr = p.get_or_add_pPr()
-    bidi = pPr.find(qn("w:bidi"))
-    if bidi is None:
-        bidi = OxmlElement("w:bidi")
-        pPr.append(bidi)
-    bidi.set(qn("w:val"), "1")
-
-
-def _set_run_font(run, size=11, bold=False):
-    run.font.name = ARABIC_FONT
-    run._element.rPr.rFonts.set(qn("w:cs"), ARABIC_FONT)
-    run.font.size = Pt(size)
-    run.bold = bold
-
-
-def _add_rtl_paragraph(doc, text="", size=11, bold=False, space_after=4):
-    p = doc.add_paragraph()
-    _set_paragraph_rtl(p)
-    p.paragraph_format.space_after = Pt(space_after)
-    run = p.add_run(text)
-    _set_run_font(run, size, bold)
-    return p
-
-
-def _add_heading(doc, text, level=1):
-    p = doc.add_paragraph()
-    _set_paragraph_rtl(p)
-    p.paragraph_format.space_before = Pt(10 if level == 1 else 6)
-    p.paragraph_format.space_after = Pt(5)
-    run = p.add_run(text)
-    _set_run_font(run, 15 if level == 1 else 13, True)
-    return p
-
-
-def _safe_filename(text: str) -> str:
-    text = re.sub(r"[\\/:*?\"<>|]+", "_", text)
-    return text.strip() or "report"
-
-
-def _item_time(item, tz):
-    value = item.get("published_at") or item.get("discovered_at")
-    if not value:
-        return "غير متوفر"
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return str(value)
-
-
-def _clean_content(value: str, max_chars=1200):
-    if not value:
-        return "لا يتوفر نص ملخص محفوظ لهذه المادة."
-    text = re.sub(r"\s+", " ", value).strip()
-    return text[:max_chars] + ("…" if len(text) > max_chars else "")
-
-
-def _add_hyperlink(paragraph, text: str, url: str):
-    if not url:
-        run = paragraph.add_run(text)
-        _set_run_font(run, 9, False)
-        return
-    part = paragraph.part
-    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
-    hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("r:id"), r_id)
-    new_run = OxmlElement("w:r")
-    rPr = OxmlElement("w:rPr")
-    rFonts = OxmlElement("w:rFonts")
-    rFonts.set(qn("w:ascii"), ARABIC_FONT)
-    rFonts.set(qn("w:hAnsi"), ARABIC_FONT)
-    rFonts.set(qn("w:cs"), ARABIC_FONT)
-    rPr.append(rFonts)
-    sz = OxmlElement("w:sz")
-    sz.set(qn("w:val"), "18")
-    rPr.append(sz)
-    new_run.append(rPr)
-    text_el = OxmlElement("w:t")
-    text_el.text = text
-    new_run.append(text_el)
-    hyperlink.append(new_run)
-    paragraph._p.append(hyperlink)
-
-
-def create_daily_report(db, timezone_name="Asia/Aden", output_dir=None, report_title="مرصد المشهد الشرقي") -> str:
-    tz = ZoneInfo(timezone_name)
-    now = datetime.now(tz)
-    items = db.get_today_items()
-    sources = db.list_sources()
-    stats = db.dashboard_stats()
-
-    output_dir = output_dir or gettempdir()
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    filename = f"موجز_أخبار_المهرة_{now.strftime('%Y-%m-%d_%H-%M')}.docx"
-    path = str(Path(output_dir) / _safe_filename(filename))
-
-    doc = Document()
-    section = doc.sections[0]
-    section.top_margin = Cm(1.8)
-    section.bottom_margin = Cm(1.8)
-    section.left_margin = Cm(1.8)
-    section.right_margin = Cm(1.8)
-
-    styles = doc.styles
-    styles["Normal"].font.name = ARABIC_FONT
-    styles["Normal"]._element.rPr.rFonts.set(qn("w:cs"), ARABIC_FONT)
-    styles["Normal"].font.size = Pt(11)
-
-    # Cover
-    p = doc.add_paragraph()
-    _set_paragraph_rtl(p)
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_before = Pt(90)
-    r = p.add_run(report_title)
-    _set_run_font(r, 24, True)
-
-    p = doc.add_paragraph()
-    _set_paragraph_rtl(p)
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("الموجز الإخباري الشامل")
-    _set_run_font(r, 19, True)
-
-    p = doc.add_paragraph()
-    _set_paragraph_rtl(p)
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run(f"{now.strftime('%Y-%m-%d')} | {now.strftime('%H:%M')} بتوقيت عدن")
-    _set_run_font(r, 12, False)
-
-    _add_rtl_paragraph(doc, "", 10, False, 20)
-    _add_rtl_paragraph(doc, "هذا التقرير مولد آليًا من قاعدة بيانات الرصد ويمكن فتحه وتحريره بالكامل في Microsoft Word.", 10, False, 10)
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.paragraph_format.space_before=Pt(90)
+    r=p.add_run("مركز رصد ومتابعة مستجدات محافظة المهرة"); r.bold=True; r.font.name="Arial"; r.font.size=Pt(23)
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    r=p.add_run("التقرير الإخباري اليومي"); r.bold=True; r.font.name="Arial"; r.font.size=Pt(31)
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    r=p.add_run("موجز الأخبار الآنية"); r.font.name="Arial"; r.font.size=Pt(17)
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.paragraph_format.space_before=Pt(35)
+    r=p.add_run(f"التاريخ: {now:%Y-%m-%d}"); r.font.name="Arial"; r.font.size=Pt(13)
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    r=p.add_run(f"الفترة: 00:00 – {now:%H:%M}"); r.font.name="Arial"; r.font.size=Pt(12)
+    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    r=p.add_run("التوقيت المرجعي: Asia/Aden"); r.font.name="Arial"; r.font.size=Pt(11)
     doc.add_page_break()
 
-    # Executive summary
-    _add_heading(doc, "1. الملخص التنفيذي", 1)
-    _add_rtl_paragraph(
-        doc,
-        f"حتى وقت إعداد التقرير، رصد النظام {len(items)} مادة إخبارية ضمن نطاق اليوم وفق توقيت {timezone_name}. "
-        f"يضم التقرير المواد المرتبطة بمعايير الرصد، مع بيانات المصدر والوقت والرابط المتاح.",
-        11,
-    )
+    h=doc.add_heading("1. الملخص التنفيذي",1); rtl(h)
+    p=doc.add_paragraph(); rtl(p)
+    p.add_run(f"يعرض هذا التقرير المواد المنشورة في اليوم الحالي فقط ({now:%Y-%m-%d})، "
+              f"من بداية اليوم 00:00 حتى وقت إعداد التقرير. عدد المواد ذات تاريخ نشر موثّق: {len(items)}. "
+              "لا تُدرج المواد الأقدم أو المواد التي تعذر التحقق من تاريخ نشرها ضمن موجز اليوم.")
 
-    _add_heading(doc, "2. مؤشرات الرصد", 1)
-    table = doc.add_table(rows=1, cols=2)
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.style = "Table Grid"
-    headers = ["البيان", "القيمة"]
-    for i, text in enumerate(headers):
-        cell = table.rows[0].cells[i]
-        _set_cell_shading(cell)
-        _set_cell_text_direction(cell)
-        p = cell.paragraphs[0]
-        _set_paragraph_rtl(p)
-        run = p.add_run(text)
-        _set_run_font(run, 11, True)
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    t=doc.add_table(rows=1,cols=3); t.style="Table Grid"
+    for i,x in enumerate(["المؤشر","القيمة","النطاق"]):
+        cell(t.rows[0].cells[i],x,True); shade(t.rows[0].cells[i])
+    for row in [("أخبار اليوم",len(items),f"00:00 – {now:%H:%M}"),
+                ("المصادر النشطة",sum(1 for s in sources if s.get("enabled",1)),"شبكة الرصد")]:
+        cs=t.add_row().cells
+        for i,x in enumerate(row): cell(cs[i],x,i==0)
 
-    metrics = [
-        ("إجمالي المواد المرصودة اليوم", len(items)),
-        ("المصادر المسجلة", stats.get("sources", 0)),
-        ("المصادر النشطة", stats.get("enabled_sources", 0)),
-        ("المصادر التي لديها أخطاء", stats.get("source_errors", 0)),
-    ]
-    for key, value in metrics:
-        cells = table.add_row().cells
-        for cell in cells:
-            _set_cell_text_direction(cell)
-        p = cells[0].paragraphs[0]
-        _set_paragraph_rtl(p)
-        _set_run_font(p.add_run(key), 10, False)
-        p = cells[1].paragraphs[0]
-        _set_paragraph_rtl(p)
-        _set_run_font(p.add_run(str(value)), 10, True)
-
-    # Sources status
-    _add_heading(doc, "3. حالة المصادر", 1)
-    for source in sources:
-        status = "يعمل" if source.get("consecutive_errors", 0) == 0 else "متعثر"
-        last = source.get("last_checked_at") or "لم يفحص بعد"
-        text = f"{source.get('name', 'مصدر')} — الحالة: {status} — آخر فحص: {last}"
-        if source.get("last_error"):
-            text += f" — الخطأ: {source['last_error']}"
-        _add_rtl_paragraph(doc, text, 10, False, 3)
-
-    # News
-    _add_heading(doc, "4. المواد الإخبارية المرصودة", 1)
+    h=doc.add_heading("2. أبرز المستجدات",1); rtl(h)
     if not items:
-        _add_rtl_paragraph(doc, "لم يتم رصد مواد إخبارية جديدة حتى وقت إعداد التقرير.", 11, False)
-    else:
-        source_counter = Counter(item.get("source_name", "مصدر غير معروف") for item in items)
-        _add_rtl_paragraph(doc, "توزيع المواد حسب المصدر:", 11, True)
-        for source_name, count in source_counter.most_common():
-            _add_rtl_paragraph(doc, f"• {source_name}: {count} مادة", 10, False, 2)
+        p=doc.add_paragraph("لا توجد أخبار منشورة اليوم بتاريخ نشر موثّق حتى لحظة إعداد التقرير."); rtl(p)
+    for i,item in enumerate(items,1):
+        p=doc.add_paragraph(); rtl(p)
+        r=p.add_run(f"{i}. {item.get('title','بدون عنوان')}"); r.bold=True; r.font.name="Arial"; r.font.size=Pt(13)
+        for label,value in [("المصدر",item.get("source_name")),
+                            ("وقت النشر",item.get("published_at")),
+                            ("درجة الصلة بالمهرة",item.get("mahra_score"))]:
+            p=doc.add_paragraph(); rtl(p); p.add_run(f"{label}: ").bold=True; p.add_run(str(value or "غير متاح"))
+        p=doc.add_paragraph(); rtl(p); p.add_run("الملخص: ").bold=True; p.add_run((item.get("content") or "لا يتوفر ملخص.")[:1200])
+        p=doc.add_paragraph(); rtl(p); p.add_run("الرابط: ").bold=True; hyperlink(p,item.get("link",""),item.get("link",""))
 
-        for idx, item in enumerate(items, 1):
-            _add_heading(doc, f"{idx}. {item.get('title', 'بدون عنوان')}", 2)
-            _add_rtl_paragraph(doc, f"المصدر: {item.get('source_name', 'غير معروف')}", 10, True, 2)
-            _add_rtl_paragraph(doc, f"وقت النشر/الرصد: {_item_time(item, tz)}", 10, False, 2)
-            score = item.get("mahra_score", 0)
-            _add_rtl_paragraph(doc, f"درجة الصلة: {score}", 10, False, 2)
-            _add_rtl_paragraph(doc, f"الملخص: {_clean_content(item.get('content', ''))}", 10, False, 4)
-            link = item.get("link", "")
-            p = doc.add_paragraph()
-            _set_paragraph_rtl(p)
-            run = p.add_run("رابط المادة الأصلية: ")
-            _set_run_font(run, 10, True)
-            if link:
-                _add_hyperlink(p, link, link)
-            doc.add_paragraph("────────────────────────────────────────")
+    h=doc.add_heading("3. حالة شبكة المصادر",1); rtl(h)
+    t=doc.add_table(rows=1,cols=3); t.style="Table Grid"
+    for i,x in enumerate(["المصدر","الحالة","أخبار اليوم"]):
+        cell(t.rows[0].cells[i],x,True); shade(t.rows[0].cells[i])
+    counts={}
+    for item in items: counts[item.get("source_name","غير معروف")]=counts.get(item.get("source_name","غير معروف"),0)+1
+    for s in sources:
+        cs=t.add_row().cells; name=s["name"]
+        cell(cs[0],name); cell(cs[1],"نشط" if s.get("enabled",1) else "متوقف"); cell(cs[2],counts.get(name,0))
 
-    # Footer
-    for sec in doc.sections:
-        footer = sec.footer.paragraphs[0]
-        _set_paragraph_rtl(footer)
-        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = footer.add_run(f"مرصد المشهد الشرقي — تقرير مولد آليًا — {now.strftime('%Y-%m-%d %H:%M')}")
-        _set_run_font(run, 8, False)
-
+    h=doc.add_heading("4. منهجية الرصد",1); rtl(h)
+    p=doc.add_paragraph(); rtl(p)
+    p.add_run("يعتمد النظام تاريخ النشر الحقيقي من RSS/Atom أو من بيانات صفحة الخبر مثل JSON-LD ووسوم النشر. "
+              "إذا لم يمكن التحقق من تاريخ النشر فلا تُدرج المادة في أخبار اليوم. "
+              "ويُحدد اليوم وفق Asia/Aden وليس وفق توقيت الخادم.")
+    p=doc.add_paragraph(); rtl(p); p.add_run(f"وقت إنشاء التقرير: {now:%Y-%m-%d %H:%M:%S} | Asia/Aden")
     doc.save(path)
-    return path
+    return str(path)
 
