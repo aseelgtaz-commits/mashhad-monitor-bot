@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from urllib.parse import urljoin
 
@@ -5,100 +6,86 @@ import aiohttp
 import feedparser
 from bs4 import BeautifulSoup
 
-from mahra_filter import calculate_mahra_score, SCORE_THRESHOLD
+from mahra_filter import SCORE_THRESHOLD, calculate_mahra_score
 
 logger = logging.getLogger(__name__)
 
 
 class NewsMonitor:
-    def __init__(self, db, channel_id=None):
+    def __init__(self, db, request_timeout: int = 20):
         self.db = db
-        self.channel_id = channel_id
-
-    @staticmethod
-    def _headers() -> dict[str, str]:
-        return {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0 Safari/537.36 MashhadMonitor/2.0"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
+        self.request_timeout = request_timeout
 
     async def fetch_url(self, session: aiohttp.ClientSession, url: str) -> str | None:
+        headers = {
+            "User-Agent": "MashhadMonitor/3.0 (+https://t.me/) Mozilla/5.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
         try:
-            timeout = aiohttp.ClientTimeout(total=20, connect=8, sock_read=15)
-            async with session.get(url, headers=self._headers(), timeout=timeout, allow_redirects=True) as response:
-                if response.status != 200:
+            timeout = aiohttp.ClientTimeout(total=self.request_timeout)
+            async with session.get(url, headers=headers, timeout=timeout, allow_redirects=True) as response:
+                if response.status >= 400:
                     raise RuntimeError(f"HTTP {response.status}")
                 return await response.text(errors="ignore")
         except Exception as exc:
-            logger.warning("تعذر جلب المصدر %s: %s", url, exc)
-            return None
+            logger.warning("تعذر جلب %s: %s", url, exc)
+            raise
 
-    def _save_candidate(self, source: dict, title: str, link: str, content: str = "", published_at: str | None = None) -> bool:
-        score, matched = calculate_mahra_score(title, content)
-        if score < SCORE_THRESHOLD:
-            return False
-        return self.db.save_item(
-            source_id=source["id"],
-            title=title,
-            link=link,
-            content=content[:10000],
-            mahra_score=score,
-            matched_keywords=matched,
-            published_at=published_at,
-        )
+    @staticmethod
+    def _entry_date(entry):
+        for key in ("published", "updated", "created"):
+            value = entry.get(key)
+            if value:
+                return str(value)
+        return None
 
-    async def parse_source(self, session: aiohttp.ClientSession, source: dict) -> dict:
-        url = source["url"]
-        content = await self.fetch_url(session, url)
-        if content is None:
-            raise RuntimeError("تعذر تحميل المصدر")
-
-        added = 0
+    async def parse_source(self, session, source):
+        content = await self.fetch_url(session, source["url"])
         feed = feedparser.parse(content)
+        saved = 0
+
         if feed.entries:
-            for entry in feed.entries:
-                title = (entry.get("title") or "").strip()
-                link = (entry.get("link") or url).strip()
-                summary = (entry.get("summary") or entry.get("description") or "").strip()
-                published_at = entry.get("published") or entry.get("updated")
-                if title and link and self._save_candidate(source, title, link, summary, published_at):
-                    added += 1
-            return {"added": added, "mode": "rss"}
+            for entry in feed.entries[:200]:
+                title = str(entry.get("title", "")).strip()
+                link = str(entry.get("link", source["url"])).strip()
+                summary = str(entry.get("summary", entry.get("description", ""))).strip()
+                score, keywords = calculate_mahra_score(title, BeautifulSoup(summary, "html.parser").get_text(" ", strip=True))
+                if score < SCORE_THRESHOLD:
+                    continue
+                if await asyncio.to_thread(
+                    self.db.save_item,
+                    source["id"], title, link, summary, score, keywords, self._entry_date(entry)
+                ):
+                    saved += 1
+            return saved
 
         soup = BeautifulSoup(content, "html.parser")
-        for a in soup.find_all("a", href=True):
-            title = a.get_text(" ", strip=True)
-            if not title or len(title) < 12:
+        for anchor in soup.find_all("a", href=True)[:500]:
+            title = anchor.get_text(" ", strip=True)
+            if len(title) < 12:
                 continue
-            link = urljoin(url, a["href"])
-            if self._save_candidate(source, title, link):
-                added += 1
+            link = urljoin(source["url"], anchor["href"])
+            score, keywords = calculate_mahra_score(title, "")
+            if score < SCORE_THRESHOLD:
+                continue
+            if await asyncio.to_thread(self.db.save_item, source["id"], title, link, "", score, keywords, None):
+                saved += 1
+        return saved
 
-        return {"added": added, "mode": "html"}
-
-    async def run_once(self) -> dict:
+    async def run_once(self):
         logger.info("بدء جولة رصد الأخبار...")
-        sources = self.db.list_sources(enabled_only=True)
-        summary = {"sources": len(sources), "success": 0, "failed": 0, "added": 0}
-        timeout = aiohttp.ClientTimeout(total=25, connect=8, sock_read=18)
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        sources = await asyncio.to_thread(self.db.list_sources)
+        connector = aiohttp.TCPConnector(limit=10, ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
             for source in sources:
+                if not source.get("enabled", True):
+                    continue
                 try:
-                    result = await self.parse_source(session, source)
-                    self.db.mark_source_result(source["id"], True)
-                    summary["success"] += 1
-                    summary["added"] += result.get("added", 0)
-                    logger.info("المصدر [%s] تمت معالجته: %s مواد جديدة", source["name"], result.get("added", 0))
+                    count = await self.parse_source(session, source)
+                    await asyncio.to_thread(self.db.mark_source_result, source["id"], True, None)
+                    logger.info("المصدر %s: تمت المعالجة، الجديد=%s", source["name"], count)
                 except Exception as exc:
-                    summary["failed"] += 1
-                    self.db.mark_source_result(source["id"], False, str(exc))
-                    logger.exception("فشل المصدر [%s]", source["name"])
-
-        logger.info("انتهت جولة الرصد: %s", summary)
-        return summary
+                    await asyncio.to_thread(self.db.mark_source_result, source["id"], False, str(exc))
+                    logger.exception("فشل المصدر %s", source["name"])
+        logger.info("انتهت جولة الرصد.")
 
