@@ -48,7 +48,7 @@ async def denied(update: Update):
         await update.effective_message.reply_text("⛔ هذا الأمر متاح للمشرفين فقط.")
 
 
-async def send_split_message(context: ContextTypes.DEFAULT_TYPE, chat_id: str, text: str, max_length: int = 4000):
+async def send_split_message(context: ContextTypes.DEFAULT_TYPE, chat_id: str, text: str, max_length: int = 3800):
     """تقسيم الرسائل لتجنب خطأ Message is too long"""
     if len(text) <= max_length:
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
@@ -92,9 +92,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "من هنا يمكنك إدارة المصادر ومتابعة الرصد."
     )
 
-    await update.message.reply_text(
-        text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    if update.message:
+        await update.message.reply_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,17 +155,19 @@ async def sources(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await denied(update)
         return
 
+    chat_id = str(update.effective_chat.id)
     rows = db.list_sources()
     if not rows:
-        await update.message.reply_text("📡 لا توجد مصادر مضافة حالياً.")
+        await context.bot.send_message(chat_id=chat_id, text="📡 لا توجد مصادر مضافة حالياً.")
         return
 
-    lines = ["📡 <b>المصادر المضافة</b>\n"]
+    lines = [f"📡 <b>المصادر المضافة ({len(rows)})</b>\n"]
     for index, row in enumerate(rows, 1):
         status = "🟢 نشط" if row["enabled"] else "⏸ متوقف"
         lines.append(f"{index}. <b>{row['name']}</b>\n   {status}\n   🔗 {row['url']}")
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+    full_text = "\n\n".join(lines)
+    await send_split_message(context, chat_id, full_text)
 
 
 async def remove_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -199,11 +206,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if not is_admin(update):
-        await query.edit_message_text("⛔ غير مصرح.")
+        await query.message.reply_text("⛔ غير مصرح.")
         return
 
     if query.data == "add_help":
-        await query.edit_message_text("➕ أرسل:\n<code>/add اسم المصدر | https://example.com</code>", parse_mode="HTML")
+        await query.message.reply_text("➕ أرسل:\n<code>/add اسم المصدر | https://example.com</code>", parse_mode="HTML")
     elif query.data == "sources":
         await sources(update, context)
     elif query.data == "report":
@@ -286,4 +293,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
