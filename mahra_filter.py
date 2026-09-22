@@ -46,4 +46,3 @@ def calculate_mahra_score(title: str, content: str = "") -> tuple[int, list[str]
 
     return score, list(dict.fromkeys(matched_words))
 
-
