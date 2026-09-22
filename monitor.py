@@ -102,4 +102,3 @@ class NewsMonitor:
         logger.info("انتهت جولة الرصد: %s", summary)
         return summary
 
-
