@@ -226,8 +226,7 @@ async def send_daily_nightly_report(app):
 # 7. التشغيل المباشر للبوت
 # ----------------------------------------------------
 def main():
-    BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ضع توكن البوت الخاص بك هنا
-
+    BOT_TOKEN = 8949984502:AAHusXsa6M-fZ3J-fIKQD1U4-Rnu0GgmSKo
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # كلمات التحية للتعرف عليها تلقائياً
