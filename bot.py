@@ -1,13 +1,17 @@
+import asyncio
+import html
 import logging
 import os
 import threading
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
@@ -19,253 +23,289 @@ from telegram.ext import (
 from database import Database
 from monitor import NewsMonitor
 
-# ----------------------------------------------------
-# 0. سيرفر وهمي لتجاوز فحص Port في Render
-# ----------------------------------------------------
-class HealthCheckHandler(BaseHTTPRequestHandler):
-
-  def do_GET(self):
-    self.send_response(200)
-    self.end_headers()
-    self.wfile.write(b"Bot is alive!")
-
-  def log_message(self, format, *args):
-    return
-
-
-def run_dummy_server():
-  port = int(os.environ.get("PORT", 10000))
-  server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-  server.serve_forever()
-
-
-threading.Thread(target=run_dummy_server, daemon=True).start()
-
-# ----------------------------------------------------
-# الإعدادات وقواعد البيانات
-# ----------------------------------------------------
-TIMEZONE = pytz.timezone("Asia/Riyadh")
-
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("mashhad_monitor")
 
-try:
-  db = Database()
-  monitor = NewsMonitor(db)
-except Exception as e:
-  logger.error(f"DB Error: {e}")
-  db = None
-  monitor = None
+TIMEZONE_NAME = os.getenv("TIMEZONE", "Asia/Aden")
+TIMEZONE = ZoneInfo(TIMEZONE_NAME)
+CHECK_INTERVAL_SECONDS = max(60, int(os.getenv("CHECK_INTERVAL_SECONDS", "300")))
+REPORT_HOUR = int(os.getenv("REPORT_HOUR", "0"))
+REPORT_MINUTE = int(os.getenv("REPORT_MINUTE", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 
-# ----------------------------------------------------
-# الأزرار واللوحات
-# ----------------------------------------------------
-
-
-def get_main_menu_keyboard():
-  keyboard = [
-      [
-          InlineKeyboardButton(
-              "📰 موجز الأخبار الآنية", callback_data="get_today_report"
-          ),
-          InlineKeyboardButton(
-              "📡 شبكة المصادر المعتمدة", callback_data="show_sources"
-          ),
-      ],
-      [
-          InlineKeyboardButton(
-              "➕ اقتراح مصدر جديد", callback_data="add_source_info"
-          ),
-          InlineKeyboardButton(
-              "⚙️ مؤشرات أداء النظام", callback_data="system_status"
-          ),
-      ],
-  ]
-  return InlineKeyboardMarkup(keyboard)
+_db = Database(os.getenv("DATABASE_PATH", "mashhad_monitor.db"), TIMEZONE_NAME)
+_monitor = NewsMonitor(_db, CHANNEL_ID or None)
+_monitor_lock = asyncio.Lock()
+_scheduler: AsyncIOScheduler | None = None
 
 
-def get_back_keyboard():
-  keyboard = [[
-      InlineKeyboardButton(
-          "🔙 العودة إلى لوحة التحكم الرئيسية", callback_data="main_menu"
-      )
-  ]]
-  return InlineKeyboardMarkup(keyboard)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Mashhad Monitor Bot is alive")
+
+    def log_message(self, format, *args):
+        return
 
 
-# ----------------------------------------------------
-# التفاعل والأوامر
-# ----------------------------------------------------
+def start_health_server() -> None:
+    port = int(os.getenv("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info("Health server listening on port %s", port)
+    server.serve_forever()
 
 
-async def welcome_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  welcome_text = (
-      "🏛 <b>مرحباً بك أستاذ أصيل!</b> 🎙\n\n"
-      "أنا <b>مساعدك الذكي المخصص لرصد ومتابعة مستجدات محافظة المهرة</b>"
-      " لحظة بلحظة.\n"
-      "أقوم بتتبع المنصات الإخبارية والمصادر المعتمدة فور صدورها، وأضع بين"
-      " يديك تقريراً شاملاً ومنظماً للحدث.\n\n"
-      "📌 <b>يرجى اختيار الخيار المطلوب من لوحة التحكم أدناه:</b>"
-  )
-
-  if update.message:
-    await update.message.reply_text(
-        welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML"
-    )
-  elif update.callback_query:
-    try:
-      await update.callback_query.edit_message_text(
-          welcome_text,
-          reply_markup=get_main_menu_keyboard(),
-          parse_mode="HTML",
-      )
-    except Exception:
-      pass
+def get_main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📰 موجز الأخبار الآنية", callback_data="get_today_report"),
+            InlineKeyboardButton("📡 شبكة المصادر", callback_data="show_sources"),
+        ],
+        [
+            InlineKeyboardButton("➕ اقتراح مصدر", callback_data="add_source_info"),
+            InlineKeyboardButton("⚙️ حالة النظام", callback_data="system_status"),
+        ],
+    ])
 
 
-async def handle_button_clicks(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-  query = update.callback_query
-  if not query:
-    return
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 العودة للرئيسية", callback_data="main_menu")]])
 
-  # إجابة فورية بدون شروط لإلغاء أيقونة التحميل على الزر
-  try:
-    await query.answer()
-  except Exception:
-    pass
 
-  data = query.data
-  logger.info(f"===> Executing button: {data}")
+WELCOME_TEXT = (
+    "🏛 <b>مرحباً بك أستاذ أصيل!</b> 🎙\n\n"
+    "أنا <b>مساعدك الذكي لرصد ومتابعة مستجدات محافظة المهرة</b> لحظة بلحظة.\n"
+    "أتابع المصادر المسجلة وأجمع المواد المرتبطة بالمهرة في قاعدة بيانات واحدة.\n\n"
+    "📌 <b>اختر الخدمة المطلوبة من لوحة التحكم:</b>"
+)
 
-  if data == "main_menu":
-    await welcome_user(update, context)
 
-  elif data == "add_source_info":
-    add_text = (
-        "➕ <b>طلب إضافة مصدر جديد للشبكة</b>\n\n"
-        "لإدراج صحيفة، موقع، أو منصة إخبارية جديدة ضمن خطة الرصد التلقائي،"
-        " يرجى إرسال رابط المصدر المباشر للإدارة."
-    )
-    await query.edit_message_text(
-        add_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
-    )
-
-  elif data == "get_today_report":
-    now_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d | %I:%M:%S %p")
-    items = db.get_today_items() if db else []
-
-    if not items:
-      report_msg = (
-          f"📑 <b>موجز الأخبار الآنية</b>\n"
-          f"⏱ <b>توقيت الاستعلام:</b> <code>{now_str}</code>\n"
-          f"───────────────────\n\n"
-          f"ℹ️ لم يتم تسجيل أي مستجدات إخبارية جديدة حتى هذه اللحظة."
-      )
-    else:
-      report_msg = (
-          f"📰 <b>الموجز الإخباري الخاص لليوم</b>\n"
-          f"⏱ <b>تحديث:</b> <code>{now_str}</code>\n"
-          f"📊 <b>إجمالي الأحداث المرصودة:</b> <code>{len(items)}</code> خبر\n"
-          f"───────────────────\n\n"
-      )
-      for idx, item in enumerate(items, 1):
-        title = item.get("title", "بدون عنوان")
-        src_name = item.get("source_name", "مصدر غير معروف")
-        link = item.get("link", "#")
-        report_msg += (
-            f"<b>{idx}. {title}</b>\n"
-            f"🔹 <b>المصدر:</b> {src_name}\n"
-            f'🔗 <a href="{link}">المادة الكاملة</a>\n\n'
+async def welcome_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(WELCOME_TEXT, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+        return
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            WELCOME_TEXT,
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode="HTML",
         )
 
-    await query.edit_message_text(
-        report_msg,
-        reply_markup=get_back_keyboard(),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
 
-  elif data == "show_sources":
-    sources = db.list_sources() if db else []
-    sources_text = "📡 <b>قائمة شبكة المصادر والمنصات المعتمدة للرصد:</b>\n\n"
-    if not sources:
-      sources_text += "لا توجد مصادر مضافة حالياً في قاعدة البيانات."
-    else:
-      for idx, src in enumerate(sources, 1):
-        status = "🟢 نشط" if src.get("enabled", True) else "🔴 متوقف"
-        name = src.get("name", "مصدر")
-        sources_text += f"<b>{idx}. {name}</b> | {status}\n"
-
-    await query.edit_message_text(
-        sources_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
-    )
-
-  elif data == "system_status":
-    stats = db.dashboard_stats() if db else {}
-    sources_cnt = stats.get("sources", 0)
-    enabled_cnt = stats.get("enabled_sources", 0)
-    today_cnt = stats.get("items_today", 0)
-
-    status_text = (
-        f"⚙️ <b>تقرير المؤشرات التشغيلية للنظام:</b>\n\n"
-        f"📡 إجمالي المنصات المسجلة: <code>{sources_cnt}</code>\n"
-        f"🟢 المصادر الفعالة حالياً: <code>{enabled_cnt}</code>\n"
-        f"📰 الأخبار المرصودة اليوم: <code>{today_cnt}</code>\n"
-        f"⏰ النطاق الزمني: <code>Asia/Riyadh</code>"
-    )
-    await query.edit_message_text(
-        status_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
-    )
-
-
-async def run_periodic_monitoring():
-  if monitor:
+async def _safe_edit(query, text: str, reply_markup=None) -> None:
     try:
-      await monitor.run_once()
-    except Exception as e:
-      logger.error(f"خطأ أثناء دورة الرصد: {e}")
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except BadRequest as exc:
+        if "Message is not modified" in str(exc):
+            return
+        raise
 
 
-async def post_init(application):
-  if monitor:
-    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-    scheduler.add_job(run_periodic_monitoring, "interval", minutes=5)
-    scheduler.start()
+async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+
+    data = query.data or ""
+    logger.info("CALLBACK RECEIVED | id=%s | data=%s | user=%s", query.id, data, query.from_user.id if query.from_user else "?")
+
+    # يجب أن تكون الإجابة على callback هي أول عملية Telegram تقريباً.
+    await query.answer()
+    logger.info("CALLBACK ANSWERED | id=%s | data=%s", query.id, data)
+
+    try:
+        if data == "main_menu":
+            await welcome_user(update, context)
+            return
+
+        if data == "add_source_info":
+            await _safe_edit(
+                query,
+                "➕ <b>طلب إضافة مصدر جديد للشبكة</b>\n\nأرسل رابط المصدر المقترح للإدارة لإضافته إلى خطة الرصد.",
+                get_back_keyboard(),
+            )
+            return
+
+        if data == "show_sources":
+            sources = await asyncio.to_thread(_db.list_sources)
+            lines = ["📡 <b>قائمة المصادر المعتمدة للرصد</b>", ""]
+            if not sources:
+                lines.append("لا توجد مصادر مسجلة حالياً.")
+            else:
+                for idx, source in enumerate(sources, 1):
+                    status = "🟢 نشط" if source["enabled"] else "🔴 متوقف"
+                    error_note = " ⚠️" if source.get("consecutive_errors", 0) else ""
+                    lines.append(f"<b>{idx}. {html.escape(source['name'])}</b> | {status}{error_note}")
+            await _safe_edit(query, "\n".join(lines), get_back_keyboard())
+            return
+
+        if data == "system_status":
+            stats = await asyncio.to_thread(_db.dashboard_stats)
+            text = (
+                "⚙️ <b>مؤشرات تشغيل النظام</b>\n\n"
+                f"📡 إجمالي المصادر: <code>{stats['sources']}</code>\n"
+                f"🟢 المصادر النشطة: <code>{stats['enabled_sources']}</code>\n"
+                f"📰 المواد المرصودة اليوم: <code>{stats['items_today']}</code>\n"
+                f"⚠️ مصادر بها أخطاء: <code>{stats['sources_with_errors']}</code>\n"
+                f"⏰ التوقيت: <code>{html.escape(TIMEZONE_NAME)}</code>\n"
+                f"🔄 الفحص الدوري: كل <code>{CHECK_INTERVAL_SECONDS}</code> ثانية"
+            )
+            await _safe_edit(query, text, get_back_keyboard())
+            return
+
+        if data == "get_today_report":
+            items = await asyncio.to_thread(_db.get_today_items, 50)
+            now_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d | %I:%M:%S %p")
+            lines = [
+                "📰 <b>الموجز الإخباري الخاص باليوم</b>",
+                f"⏱ <b>وقت الاستعلام:</b> <code>{now_str}</code>",
+                f"📊 <b>عدد المواد:</b> <code>{len(items)}</code>",
+                "───────────────────",
+            ]
+            if not items:
+                lines.append("ℹ️ لم يتم تسجيل مستجدات مرتبطة بالمهرة حتى الآن.")
+            else:
+                for idx, item in enumerate(items, 1):
+                    title = html.escape(item.get("title", "بدون عنوان"))
+                    source = html.escape(item.get("source_name") or "مصدر غير معروف")
+                    link = html.escape(item.get("link") or "#", quote=True)
+                    lines.append(f"<b>{idx}. {title}</b>\n🔹 <b>المصدر:</b> {source}\n🔗 <a href=\"{link}\">المادة الكاملة</a>")
+            await _safe_edit(query, "\n\n".join(lines), get_back_keyboard())
+            return
+
+        logger.warning("Unknown callback_data received: %s", data)
+        await _safe_edit(query, "⚠️ هذا الخيار غير معروف أو لم يعد متاحاً.", get_back_keyboard())
+
+    except Exception:
+        logger.exception("CALLBACK FAILED | id=%s | data=%s", query.id, data)
+        try:
+            await query.edit_message_text(
+                "⚠️ حدث خطأ أثناء تنفيذ الطلب. تم تسجيل التفاصيل في سجل النظام.",
+                reply_markup=get_back_keyboard(),
+            )
+        except Exception:
+            logger.exception("تعذر عرض رسالة الخطأ للمستخدم")
 
 
-# ----------------------------------------------------
-# التشغيل
-# ----------------------------------------------------
-def main():
-  BOT_TOKEN = os.environ.get(
-      "BOT_TOKEN", "8949984502:AAHusXsa6M-fZ3J-fIKQD1U4-Rnu0GgmSKo"
-  )
+async def run_periodic_monitoring() -> None:
+    if _monitor_lock.locked():
+        logger.warning("تم تخطي دورة الرصد: الدورة السابقة ما زالت تعمل")
+        return
+    async with _monitor_lock:
+        try:
+            summary = await _monitor.run_once()
+            logger.info("MONITOR CYCLE COMPLETE | %s", summary)
+        except Exception:
+            logger.exception("MONITOR CYCLE FAILED")
 
-  app = (
-      ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-  )
 
-  greeting_patterns = r"^(مرحبا|مرحباً|السلام عليكم|سلام|هلو|أهلا|اهلا|hello|hi)$"
+async def send_daily_report(application: Application) -> None:
+    if not CHANNEL_ID:
+        logger.warning("CHANNEL_ID غير مضبوط؛ تم تخطي التقرير اليومي")
+        return
+    try:
+        report = await asyncio.to_thread(_db.build_daily_report, 50)
+        await application.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=report,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        logger.info("DAILY REPORT SENT")
+    except TelegramError:
+        logger.exception("فشل إرسال التقرير اليومي إلى القناة")
+    except Exception:
+        logger.exception("DAILY REPORT FAILED")
 
-  app.add_handler(CommandHandler("start", welcome_user))
-  app.add_handler(CommandHandler("report", welcome_user))
-  app.add_handler(CallbackQueryHandler(handle_button_clicks))
-  app.add_handler(
-      MessageHandler(
-          filters.Regex(greeting_patterns)
-          | filters.TEXT & ~filters.COMMAND,
-          welcome_user,
-      )
-  )
 
-  logger.info("تم تشغيل البوت المحدث بنجاح...")
-  app.run_polling(drop_pending_updates=True)
+async def post_init(application: Application) -> None:
+    global _scheduler
+    _scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    _scheduler.add_job(
+        run_periodic_monitoring,
+        "interval",
+        seconds=CHECK_INTERVAL_SECONDS,
+        id="monitoring",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        send_daily_report,
+        "cron",
+        hour=REPORT_HOUR,
+        minute=REPORT_MINUTE,
+        args=[application],
+        id="daily_report",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.start()
+    logger.info("Scheduler started | interval=%ss | daily=%02d:%02d %s", CHECK_INTERVAL_SECONDS, REPORT_HOUR, REPORT_MINUTE, TIMEZONE_NAME)
+
+    # دورة أولية بعد بدء التطبيق، حتى لا ننتظر 5 دقائق لأول فحص.
+    application.create_task(run_periodic_monitoring(), name="initial-monitoring")
+
+
+async def post_shutdown(application: Application) -> None:
+    global _scheduler
+    if _scheduler and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+        logger.info("Scheduler stopped")
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("UNHANDLED UPDATE ERROR | update=%r", update, exc_info=context.error)
+
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN غير مضبوط في Environment Variables")
+
+    threading.Thread(target=start_health_server, daemon=True, name="render-health-server").start()
+
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
+
+    greeting_patterns = r"^(مرحبا|مرحباً|السلام عليكم|سلام|هلو|أهلا|اهلا|hello|hi)$"
+
+    application.add_handler(CommandHandler("start", welcome_user))
+    application.add_handler(CommandHandler("report", welcome_user))
+    application.add_handler(CallbackQueryHandler(handle_button_clicks))
+    application.add_handler(
+        MessageHandler(
+            filters.Regex(greeting_patterns) & ~filters.COMMAND,
+            welcome_user,
+        )
+    )
+    application.add_error_handler(error_handler)
+
+    logger.info("Mashhad Monitor Bot starting | PTB=%s | Python=%s", __import__("telegram").__version__, __import__("sys").version.split()[0])
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=True,
+    )
 
 
 if __name__ == "__main__":
-  main()
+    main()
+
+
