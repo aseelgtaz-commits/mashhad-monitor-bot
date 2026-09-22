@@ -20,7 +20,7 @@ from database import Database
 from monitor import NewsMonitor
 
 # ----------------------------------------------------
-# 0. سيرفر وهمي لتجاوز فحص Port في Render المجاني
+# 0. سيرفر وهمي لتجاوز فحص Port في Render
 # ----------------------------------------------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
 
@@ -42,7 +42,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # ----------------------------------------------------
-# ضبط التوقيت والإعدادات وقواعد البيانات
+# الإعدادات وقواعد البيانات
 # ----------------------------------------------------
 TIMEZONE = pytz.timezone("Asia/Riyadh")
 
@@ -56,7 +56,7 @@ db = Database()
 monitor = NewsMonitor(db)
 
 # ----------------------------------------------------
-# اللوحات والأزرار
+# الأزرار واللوحات
 # ----------------------------------------------------
 
 
@@ -98,33 +98,30 @@ def get_back_keyboard():
 
 async def welcome_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
   welcome_text = (
-      "🏛 **مرحباً بك أستاذ أصيل!** 🎙\n\n"
-      "أنا **مساعدك الذكي المخصص لرصد ومتابعة مستجدات محافظة المهرة** "
-      "لحظة بلحظة.\n"
+      "🏛 <b>مرحباً بك أستاذ أصيل!</b> 🎙\n\n"
+      "أنا <b>مساعدك الذكي المخصص لرصد ومتابعة مستجدات محافظة المهرة</b>"
+      " لحظة بلحظة.\n"
       "أقوم بتتبع المنصات الإخبارية والمصادر المعتمدة فور صدورها، وأضع بين"
       " يديك تقريراً شاملاً ومنظماً للحدث.\n\n"
-      "📌 **يرجى اختيار الخيار المطلوب من لوحة التحكم أدناه:**"
+      "📌 <b>يرجى اختيار الخيار المطلوب من لوحة التحكم أدناه:</b>"
   )
 
   if update.message:
     await update.message.reply_text(
-        welcome_text,
-        reply_markup=get_main_menu_keyboard(),
-        parse_mode="Markdown",
+        welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode="HTML"
     )
   elif update.callback_query:
     try:
       await update.callback_query.edit_message_text(
           welcome_text,
           reply_markup=get_main_menu_keyboard(),
-          parse_mode="Markdown",
+          parse_mode="HTML",
       )
-    except Exception as e:
-      logger.warning(f"Error editing message: {e}")
+    except Exception:
       await update.callback_query.message.reply_text(
           welcome_text,
           reply_markup=get_main_menu_keyboard(),
-          parse_mode="Markdown",
+          parse_mode="HTML",
       )
 
 
@@ -132,112 +129,125 @@ async def handle_button_clicks(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
   query = update.callback_query
+  if not query:
+    return
 
-  # إجابة تليجرام فوراً لإيقاف مؤشر الانتظار على الزر
+  # إجابة تليجرام فوراً لإخفاء أيقونة التحميل على الزر
   try:
     await query.answer()
   except Exception as e:
-    logger.warning(f"Callback query answer error: {e}")
+    logger.warning(f"Answer error: {e}")
 
   data = query.data
-  logger.info(f"===> Button clicked: {data}")
+  logger.info(f"Button pressed: {data}")
 
-  if data == "main_menu":
-    await welcome_user(update, context)
+  try:
+    if data == "main_menu":
+      await welcome_user(update, context)
 
-  elif data == "get_today_report":
-    try:
-      items = db.get_today_items()
-    except Exception as e:
-      logger.error(f"Error reading db: {e}")
-      items = []
+    elif data == "get_today_report":
+      try:
+        items = db.get_today_items()
+      except Exception as e:
+        logger.error(f"Error fetching today items: {e}")
+        items = []
 
-    now_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d | %I:%M:%S %p")
+      now_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d | %I:%M:%S %p")
 
-    if not items:
-      report_msg = (
-          f"📑 **موجز الأخبار الآنية**\n"
-          f"⏱ **توقيت الاستعلام:** `{now_str}`\n"
-          f"───────────────────\n\n"
-          f"ℹ️ لم يتم تسجيل أي مستجدات إخبارية جديدة حتى هذه اللحظة."
-      )
-    else:
-      report_msg = (
-          f"📰 **الموجز الإخباري الخاص لليوم**\n"
-          f"⏱ **تحديث:** `{now_str}`\n"
-          f"📊 **إجمالي الأحداث المرصودة:** `{len(items)}` خبر\n"
-          f"───────────────────\n\n"
-      )
-      for idx, item in enumerate(items, 1):
-        title = item.get("title", "بدون عنوان")
-        src_name = item.get("source_name", "مصدر غير معروف")
-        link = item.get("link", "#")
-        report_msg += (
-            f"**{idx}. {title}**\n"
-            f"🔹 **المصدر:** {src_name}\n"
-            f"🔗 [المادة الكاملة]({link})\n\n"
+      if not items:
+        report_msg = (
+            f"📑 <b>موجز الأخبار الآنية</b>\n"
+            f"⏱ <b>توقيت الاستعلام:</b> <code>{now_str}</code>\n"
+            f"───────────────────\n\n"
+            f"ℹ️ لم يتم تسجيل أي مستجدات إخبارية جديدة حتى هذه اللحظة."
         )
+      else:
+        report_msg = (
+            f"📰 <b>الموجز الإخباري الخاص لليوم</b>\n"
+            f"⏱ <b>تحديث:</b> <code>{now_str}</code>\n"
+            f"📊 <b>إجمالي الأحداث المرصودة:</b> <code>{len(items)}</code> خبر\n"
+            f"───────────────────\n\n"
+        )
+        for idx, item in enumerate(items, 1):
+          title = item.get("title", "بدون عنوان")
+          src_name = item.get("source_name", "مصدر غير معروف")
+          link = item.get("link", "#")
+          report_msg += (
+              f"<b>{idx}. {title}</b>\n"
+              f"🔹 <b>المصدر:</b> {src_name}\n"
+              f'🔗 <a href="{link}">المادة الكاملة</a>\n\n'
+          )
 
-    await query.edit_message_text(
-        report_msg,
-        reply_markup=get_back_keyboard(),
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
+      await query.edit_message_text(
+          report_msg,
+          reply_markup=get_back_keyboard(),
+          parse_mode="HTML",
+          disable_web_page_preview=True,
+      )
 
-  elif data == "show_sources":
+    elif data == "show_sources":
+      try:
+        sources = db.list_sources()
+      except Exception as e:
+        logger.error(f"Error fetching sources: {e}")
+        sources = []
+
+      sources_text = (
+          "📡 <b>قائمة شبكة المصادر والمنصات المعتمدة للرصد:</b>\n\n"
+      )
+      if not sources:
+        sources_text += "لا توجد مصادر مضافة حالياً في قاعدة البيانات."
+      else:
+        for idx, src in enumerate(sources, 1):
+          status = "🟢 نشط" if src.get("enabled", True) else "🔴 متوقف"
+          name = src.get("name", "مصدر")
+          sources_text += f"<b>{idx}. {name}</b> | {status}\n"
+
+      await query.edit_message_text(
+          sources_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
+      )
+
+    elif data == "add_source_info":
+      add_text = (
+          "➕ <b>طلب إضافة مصدر جديد للشبكة</b>\n\n"
+          "لإدراج صحيفة، موقع، أو منصة إخبارية جديدة ضمن خطة الرصد"
+          " التلقائي، يرجى إرسال رابط المصدر المباشر للإدارة."
+      )
+      await query.edit_message_text(
+          add_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
+      )
+
+    elif data == "system_status":
+      try:
+        stats = db.dashboard_stats()
+        sources_cnt = stats.get("sources", 0)
+        enabled_cnt = stats.get("enabled_sources", 0)
+        today_cnt = stats.get("items_today", 0)
+      except Exception as e:
+        logger.error(f"Error fetching stats: {e}")
+        sources_cnt, enabled_cnt, today_cnt = 0, 0, 0
+
+      status_text = (
+          f"⚙️ <b>تقرير المؤشرات التشغيلية للنظام:</b>\n\n"
+          f"📡 إجمالي المنصات المسجلة: <code>{sources_cnt}</code>\n"
+          f"🟢 المصادر الفعالة حالياً: <code>{enabled_cnt}</code>\n"
+          f"📰 الأخبار المرصودة اليوم: <code>{today_cnt}</code>\n"
+          f"⏰ النطاق الزمني: <code>Asia/Riyadh</code>"
+      )
+      await query.edit_message_text(
+          status_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
+      )
+
+  except Exception as e:
+    logger.error(f"General button handler error: {e}")
+    # في حال حدوث أي خطأ غير متوقع، إرسال هذه الرسالة وتجنب التجمد
     try:
-      sources = db.list_sources()
-    except Exception as e:
-      logger.error(f"Error getting sources: {e}")
-      sources = []
-
-    sources_text = "📡 **قائمة شبكة المصادر والمنصات المعتمدة للرصد:**\n\n"
-    if not sources:
-      sources_text += "لا توجد مصادر مضافة حالياً في قاعدة البيانات."
-    else:
-      for idx, src in enumerate(sources, 1):
-        status = "🟢 نشط" if src.get("enabled", True) else "🔴 متوقف"
-        name = src.get("name", "مصدر")
-        sources_text += f"**{idx}. {name}** | {status}\n"
-
-    await query.edit_message_text(
-        sources_text, reply_markup=get_back_keyboard(), parse_mode="Markdown"
-    )
-
-  elif data == "add_source_info":
-    add_text = (
-        "➕ **طلب إضافة مصدر جديد للشبكة**\n\n"
-        "لإدراج صحيفة، موقع، أو منصة إخبارية جديدة ضمن خطة الرصد"
-        " التلقائي، يرجى إرسال رابط المصدر المباشر للإدارة."
-    )
-    await query.edit_message_text(
-        add_text, reply_markup=get_back_keyboard(), parse_mode="Markdown"
-    )
-
-  elif data == "system_status":
-    try:
-      stats = db.dashboard_stats()
-      sources_cnt = stats.get("sources", 0)
-      enabled_cnt = stats.get("enabled_sources", 0)
-      today_cnt = stats.get("items_today", 0)
-    except Exception as e:
-      logger.error(f"Error getting stats: {e}")
-      sources_cnt, enabled_cnt, today_cnt = 0, 0, 0
-
-    status_text = (
-        f"⚙️ **تقرير المؤشرات التشغيلية للنظام:**\n\n"
-        f"📡 إجمالي المنصات المسجلة: `{sources_cnt}`\n"
-        f"🟢 المصادر الفعالة حالياً: `{enabled_cnt}`\n"
-        f"📰 الأخبار المرصودة اليوم: `{today_cnt}`\n"
-        f"⏰ النطاق الزمني: `Asia/Riyadh`"
-    )
-    await query.edit_message_text(
-        status_text, reply_markup=get_back_keyboard(), parse_mode="Markdown"
-    )
-
-  else:
-    await welcome_user(update, context)
+      await query.edit_message_text(
+          "⚠️ حدث خطأ أثناء تنفيذ الطلب، يرجى المحاولة مرة أخرى.",
+          reply_markup=get_back_keyboard(),
+      )
+    except Exception:
+      pass
 
 
 async def run_periodic_monitoring():
@@ -258,7 +268,6 @@ def main():
 
   greeting_patterns = r"^(مرحبا|مرحباً|السلام عليكم|سلام|هلو|أهلا|اهلا|hello|hi)$"
 
-  # إضافة موجهات الأوامر والأزرار بشكل مباشر ودقيق
   app.add_handler(CommandHandler("start", welcome_user))
   app.add_handler(CommandHandler("report", welcome_user))
   app.add_handler(CallbackQueryHandler(handle_button_clicks))
@@ -276,6 +285,10 @@ def main():
 
   logger.info("تم تشغيل البوت بنجاح...")
   app.run_polling()
+
+
+if __name__ == "__main__":
+  main()
 
 
 if __name__ == "__main__":
