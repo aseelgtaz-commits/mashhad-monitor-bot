@@ -19,8 +19,12 @@ CONTEXT_KEYWORDS = [
 SCORE_THRESHOLD = 8
 
 
-def _contains_phrase(text: str, phrase: str) -> bool:
-    return phrase in text
+def _contains(text: str, keyword: str) -> bool:
+    if not text or not keyword:
+        return False
+    if " " in keyword:
+        return keyword.lower() in text.lower()
+    return bool(re.search(r"(?<!\w)" + re.escape(keyword) + r"(?!\w)", text, re.IGNORECASE))
 
 
 def calculate_mahra_score(title: str, content: str = "") -> tuple[int, list[str]]:
@@ -29,19 +33,18 @@ def calculate_mahra_score(title: str, content: str = "") -> tuple[int, list[str]
     matched_words: list[str] = []
 
     for keyword in MAHRA_KEYWORDS_HIGH:
-        pattern = r"(?<!\w)" + re.escape(keyword) + r"(?!\w)"
-        if re.search(pattern, text, re.IGNORECASE):
+        if _contains(text, keyword):
             score += 10
             matched_words.append(keyword)
 
     for keyword in MAHRA_KEYWORDS_MEDIUM:
-        if _contains_phrase(text, keyword):
+        if _contains(text, keyword):
             score += 12
             matched_words.append(keyword)
 
     if score > 0:
         for keyword in CONTEXT_KEYWORDS:
-            if keyword in text:
+            if _contains(text, keyword):
                 score += 2
 
     return score, list(dict.fromkeys(matched_words))
