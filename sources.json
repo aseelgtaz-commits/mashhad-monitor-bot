@@ -1,43 +1,38 @@
 [
   {
-    "id": 1,
-    "name": "أبو أيهم المهري (RSS)",
-    "url": "https://rss.app/feeds/ofDNjDV39HPl1dhc.xml"
+    "name": "أبو أيهم المهري",
+    "page_url": "https://www.facebook.com/profile.php?id=100084401507152",
+    "rss_url": "https://rss.app/feeds/ofDNjDV39HPl1dhc.xml",
+    "enabled": true,
+    "accept_all": true
   },
   {
-    "id": 2,
-    "name": "موقع المهرة خبور",
-    "url": "https://almahrahkhboor.net/section/news"
+    "name": "سليمان الجدحي",
+    "page_url": "https://www.facebook.com/slyman.aljdhy",
+    "rss_url": "",
+    "enabled": true,
+    "accept_all": true
   },
   {
-    "id": 3,
-    "name": "موقع المهرية نت",
-    "url": "https://almahriah.net"
+    "name": "محمد عوض رعيان",
+    "page_url": "https://www.facebook.com/mhmd.wd.r.yan.alkthyry",
+    "rss_url": "",
+    "enabled": true,
+    "accept_all": true
   },
   {
-    "id": 4,
-    "name": "موقع عين المهرة",
-    "url": "https://ainalmahrah.com/cat9.html"
+    "name": "مركز المهرة الإعلامي",
+    "page_url": "https://www.facebook.com/mcalmahrah",
+    "rss_url": "",
+    "enabled": true,
+    "accept_all": true
   },
   {
-    "id": 5,
-    "name": "موقع المهرة نيوز",
-    "url": "https://almahranews.com"
-  },
-  {
-    "id": 6,
-    "name": "موقع المهرة اونلاين",
-    "url": "https://almahrahonline.net"
-  },
-  {
-    "id": 7,
-    "name": "موقع الموقع بوست",
-    "url": "https://almawqeapost.net/city/10"
-  },
-  {
-    "id": 8,
-    "name": "موقع محافظة المهرة",
-    "url": "https://almahrahgov.com"
+    "name": "منصة مدار المهرة",
+    "page_url": "https://www.facebook.com/madaralmahrh",
+    "rss_url": "",
+    "enabled": true,
+    "accept_all": true
   }
 ]
 
