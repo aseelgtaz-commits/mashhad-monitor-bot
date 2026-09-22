@@ -1,132 +1,108 @@
 import logging
-import feedparser
-import asyncio
 import re
-import requests
+import aiohttp
 from bs4 import BeautifulSoup
-from typing import List, Dict, Any
-from database import Database
-from mahra_filter import calculate_mahra_score, SCORE_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
+# قائمة الكلمات المفتاحية الشاملة لرصد أخبار المهرة وسقطرى (معدلة ومصححة)
+MAHRA_KEYWORDS = [
+    # --- المحافظة والمديريات ---
+    "المهرة", "الغيطة", "حوف", "قشن", "سيحوت", 
+    "شحن", "حصوين", "المسيلة", "حات", "منعر", "سقطرى",
+
+    # --- القبائل والعائلات المهرية ---
+    "كلشات", "الحريزي", "الجدحي", "زعبنوت", "الزبيدي", "محامد", "بن محامد", 
+    "بلحاف", "بن عفرار", "عفرار", "رعفيت", "قمصيت", 
+    "كده", "كدة", "يسهول", "بيت ياسر", "صمودة",
+
+    # --- المنافذ والموانئ والمناطق الحيوية ---
+    "منفذ شحن", "منفذ صرفيت", "صرفيت", "منفذ الوديعة", 
+    "ميناء نشطون", "نشطون", "ساحل المهرة", "مارينا", "العيس",
+
+    # --- القيادات والشخصيات البارزة ---
+    "محمد علي ياسر", "بن ياسر", "راجح باكريت", "باكريت", 
+    "علي سالم الحريزي", "توكل كرمان", "عبدالله بن عفرار", "بن سديف",
+
+    # --- المكونات والقوات والجهات الفاعلة ---
+    "أحرار المهرة", "درع الوطن", "المجلس التنسيقي للمهرة", 
+    "المجلس العام لأبناء المهرة وسقطرى", "المجلس العام لأبناء المهرة", 
+    "لجنة الاعتصام السلمي", "لجنة اعتصام المهرة", "اعتصام المهرة", 
+    "السلطة المحلية بالمهرة", "شرطة المهرة", 
+    "التحالف السعودي", "التحالف السعودي في المهرة", "التحالف في المهرة",
+
+    # --- مصطلحات وأحداث مرتبطة ---
+    "بحر العرب", "إعصار المهرة", "منخفض جوي المهرة", "الصيد البحري المهرة"
+]
+
 class NewsMonitor:
-    def __init__(self, db: Database, channel_id: str = None):
+    def __init__(self, db, channel_id=None):
         self.db = db
         self.channel_id = channel_id
 
-    def convert_url_if_social(self, url: str) -> str:
-        """تحويل روابط X و Facebook لروابط قابلة للرصد برمجياً"""
-        # تحويل روابط منصة X (تويتر) إلى تغذية RSS عبر نيتير
-        if "x.com/" in url or "twitter.com/" in url:
-            username = url.split("/")[-1].split("?")[0]
-            return f"https://nitter.net/{username}/rss"
-        return url
+    def calculate_score(self, text: str) -> int:
+        if not text:
+            return 0
+        score = 0
+        for kw in MAHRA_KEYWORDS:
+            if kw in text:
+                score += 1
+        return score
 
-    async def fetch_facebook_posts(self, url: str) -> List[Dict[str, Any]]:
-        """جلب المنشورات العامة من صفحات الفيس بوك"""
-        items = []
+    async def fetch_page(self, session, url):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, lambda: requests.get(url, headers=headers, timeout=10))
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                # استخراج النصوص العامة للبروفايل
-                posts = soup.find_all('p')
-                for post in posts[:5]:
-                    text = post.get_text().strip()
-                    if len(text) > 20:
-                        items.append({
-                            'title': text[:80] + "...",
-                            'link': url,
-                            'content': text
-                        })
+            async with session.get(url, headers=headers, timeout=15) as response:
+                if response.status == 200:
+                    return await response.text()
         except Exception as e:
-            logger.error(f"خطأ أثناء جلب فيس بوك من {url}: {e}")
-        return items
+            logger.warning(f"تعذر جلب الرابط {url}: {e}")
+        return None
 
-    async def fetch_feed(self, url: str) -> List[Dict[str, Any]]:
-        """جلب المحتوى سواء كان RSS أو منصات تواصل"""
-        target_url = self.convert_url_if_social(url)
+    async def parse_source(self, session, source):
+        url = source["url"]
         
-        if "facebook.com" in url:
-            return await self.fetch_facebook_posts(url)
+        # تخطي روابط منصات التواصل الاجتماعي المباشرة لتجنب الحظر
+        if any(domain in url for domain in ["facebook.com", "x.com", "twitter.com", "instagram.com"]):
+            return
 
-        try:
-            loop = asyncio.get_event_loop()
-            feed = await loop.run_in_executor(None, feedparser.parse, target_url)
-            
-            items = []
-            for entry in feed.entries:
-                title = getattr(entry, 'title', '').strip()
-                link = getattr(entry, 'link', '').strip()
-                summary = getattr(entry, 'summary', getattr(entry, 'description', '')).strip()
-                
-                if title and link:
-                    items.append({
-                        'title': title,
-                        'link': link,
-                        'content': summary
-                    })
-            return items
-        except Exception as e:
-            logger.error(f"خطأ أثناء جلب التغذية من {target_url}: {e}")
-            return []
+        html = await self.fetch_page(session, url)
+        if not html:
+            return
 
-    async def process_source(self, source_id: int, source_name: str, url: str, bot=None):
-        logger.info(f"بدء فحص المصدر: {source_name}")
-        items = await self.fetch_feed(url)
-        
-        for item in items:
-            try:
-                title = item['title']
-                link = item['link']
-                content = item['content']
+        soup = BeautifulSoup(html, "html.parser")
+        links = soup.find_all("a", href=True)
 
-                score, matched = calculate_mahra_score(title, content)
-                if score < SCORE_THRESHOLD:
-                    continue
+        for a in links:
+            title = a.get_text(strip=True)
+            link = a["href"]
 
-                is_new = self.db.save_item(
-                    source_id=source_id,
+            if not title or len(title) < 12:
+                continue
+
+            if not link.startswith("http"):
+                from urllib.parse import urljoin
+                link = urljoin(url, link)
+
+            score = self.calculate_score(title)
+            if score > 0:
+                saved = self.db.save_item(
+                    source_id=source["id"],
                     title=title,
                     link=link,
-                    content=content,
+                    content="",
                     mahra_score=score
                 )
-
-                if is_new and bot and self.channel_id:
-                    message_text = (
-                        f"📰 <b>{title}</b>\n\n"
-                        f"🔹 <b>المصدر:</b> {source_name}\n"
-                        f"🔗 <a href='{link}'>قراءة الخبر/المنشور كاملًا</a>"
-                    )
-                    await bot.send_message(
-                        chat_id=self.channel_id,
-                        text=message_text,
-                        parse_mode="HTML",
-                        disable_web_page_preview=False
-                    )
-                    logger.info(f"تم نشر خبر المهرة: {title} (Score: {score})")
-
-            except Exception as e:
-                logger.error(f"خطأ أثناء معالجة عنصر من {source_name}: {e}")
+                if saved:
+                    logger.info(f"تم رصد خبر جديد [{title}] بكلمة مفتاحية تطابق المهرة.")
 
     async def run_once(self, bot=None):
-        logger.info("بدء دورة رصد المصادر...")
+        logger.info("بدء جولة رصد الأخبار...")
         sources = self.db.list_sources()
-        
-        for source in sources:
-            source_id, name, url, enabled = source["id"], source["name"], source["url"], source["enabled"]
-            if not enabled:
-                continue
-            try:
-                await self.process_source(source_id, name, url, bot=bot)
-            except Exception as e:
-                logger.error(f"فشل فحص المصدر [{name}]: {e}")
-                
-        logger.info("اكتملت دورة رصد المصادر بنجاح.")
-
-Monitor = NewsMonitor
+        async with aiohttp.ClientSession() as session:
+            for source in sources:
+                if source["enabled"]:
+                    await self.parse_source(session, source)
+        logger.info("انتهت جولة الرصد.")
