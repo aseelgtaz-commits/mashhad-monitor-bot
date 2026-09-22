@@ -1,154 +1,150 @@
 import sqlite3
-import hashlib
-from datetime import datetime, timezone
+import json
+import os
+import logging
 
-
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
+logger = logging.getLogger(__name__)
 
 class Database:
-    def __init__(self, path="mashhad_monitor.db"):
-        self.path = path
-        self._init()
+    def __init__(self, db_path="mashhad_monitor.db"):
+        self.db_path = db_path
+        self.init_db()
+        self.seed_sources_from_json()
 
-    def connect(self):
-        conn = sqlite3.connect(self.path)
+    def get_connection(self):
+        conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _init(self):
-        with self.connect() as conn:
-            conn.executescript(
-                """
+    def init_db(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS sources (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
-                    url TEXT NOT NULL UNIQUE,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    last_checked TEXT,
-                    last_success TEXT,
-                    last_error TEXT,
-                    error_count INTEGER NOT NULL DEFAULT 0
-                );
-
+                    url TEXT UNIQUE NOT NULL,
+                    enabled INTEGER DEFAULT 1
+                )
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_id INTEGER NOT NULL,
-                    title TEXT,
-                    url TEXT NOT NULL,
-                    summary TEXT,
-                    published_at TEXT,
-                    detected_at TEXT NOT NULL,
-                    fingerprint TEXT NOT NULL UNIQUE,
-                    is_important INTEGER NOT NULL DEFAULT 0,
-                    published_to_channel INTEGER NOT NULL DEFAULT 0,
-                    mahra_score INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(source_id) REFERENCES sources(id)
-                );
+                    source_id INTEGER,
+                    title TEXT NOT NULL,
+                    link TEXT UNIQUE NOT NULL,
+                    content TEXT,
+                    mahra_score INTEGER DEFAULT 0,
+                    published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (source_id) REFERENCES sources (id)
+                )
+            """)
+            conn.commit()
 
-                CREATE INDEX IF NOT EXISTS idx_items_detected ON items(detected_at);
-                CREATE INDEX IF NOT EXISTS idx_items_source ON items(source_id);
-                """
-            )
-            # إضافة عمود mahra_score للقواعد القديمة إن لم يكن موجوداً
+    def seed_sources_from_json(self):
+        """قراءة المصادر من sources.json واستعادتها تلقائياً إذا كانت الداتا بيز فارغة"""
+        if os.path.exists("sources.json"):
             try:
-                conn.execute("ALTER TABLE items ADD COLUMN mahra_score INTEGER NOT NULL DEFAULT 0;")
-            except sqlite3.OperationalError:
-                pass  # العمود موجود بالفعل
+                with open("sources.json", "r", encoding="utf-8") as f:
+                    sources = json.load(f)
+                
+                with self.get_connection() as conn:
+                    cursor = conn.cursor()
+                    for src in sources:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO sources (name, url) VALUES (?, ?)",
+                            (src["name"], src["url"])
+                        )
+                    conn.commit()
+                logger.info("تمت استعادة المصادر بنجاح من ملف sources.json")
+            except Exception as e:
+                logger.error(f"خطأ أثناء قراءة sources.json: {e}")
 
-    def add_source(self, name, url):
-        with self.connect() as conn:
-            exists = conn.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
-            if exists:
-                raise ValueError("هذا المصدر موجود مسبقاً.")
-            cur = conn.execute(
-                "INSERT INTO sources(name, url, enabled, created_at) VALUES (?, ?, 1, ?)",
-                (name, url, now_iso()),
-            )
-            return cur.lastrowid
+    def add_source(self, name: str, url: str) -> int:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO sources (name, url) VALUES (?, ?)", (name, url))
+            conn.commit()
+            return cursor.lastrowid
 
     def list_sources(self):
-        with self.connect() as conn:
-            return conn.execute("SELECT * FROM sources ORDER BY id").fetchall()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, url, enabled FROM sources ORDER BY id ASC")
+            return [dict(row) for row in cursor.fetchall()]
 
-    def remove_source(self, source_id):
-        with self.connect() as conn:
-            conn.execute("DELETE FROM items WHERE source_id = ?", (source_id,))
-            conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
-
-    def save_item(self, source_id, title, link, content, mahra_score=0):
-        """حفظ الخبر مع التأكد من عدم التكرار بواسطة Hash fingerprint"""
-        raw_fingerprint = f"{link}-{title}".encode('utf-8')
-        fingerprint = hashlib.md5(raw_fingerprint).hexdigest()
-
-        with self.connect() as conn:
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO items(source_id, title, url, summary, detected_at, fingerprint, mahra_score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (source_id, title, link, content, now_iso(), fingerprint, mahra_score)
-                )
-                return True
-            except sqlite3.IntegrityError:
-                return False  # الخبر موجود مسبقاً
-
-    def get_today_mahra_items(self):
-        """استرجاع الأخبار الخاصة بالمهرة والمستخرجة اليوم"""
-        with self.connect() as conn:
-            return conn.execute(
-                """
-                SELECT i.title, s.name as source_name, i.url, i.mahra_score, i.detected_at
-                FROM items i
-                JOIN sources s ON s.id = i.source_id
-                WHERE date(i.detected_at) = date('now')
-                ORDER BY i.detected_at DESC
-                """
-            ).fetchall()
+    def remove_source(self, source_id: int):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+            conn.commit()
 
     def dashboard_stats(self):
-        with self.connect() as conn:
-            sources = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
-            enabled = conn.execute("SELECT COUNT(*) FROM sources WHERE enabled = 1").fetchone()[0]
-            items_today = conn.execute("SELECT COUNT(*) FROM items WHERE date(detected_at) = date('now')").fetchone()[0]
-            published_today = conn.execute("SELECT COUNT(*) FROM items WHERE published_to_channel = 1 AND date(detected_at) = date('now')").fetchone()[0]
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sources")
+            total_sources = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM sources WHERE enabled = 1")
+            enabled_sources = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM items WHERE date(published_at) = date('now')")
+            items_today = cursor.fetchone()[0]
+
             return {
-                "sources": sources,
-                "enabled_sources": enabled,
+                "sources": total_sources,
+                "enabled_sources": enabled_sources,
                 "items_today": items_today,
-                "published_today": published_today,
+                "published_today": items_today
             }
 
-    def build_daily_report(self):
-        rows = self.get_today_mahra_items()
-        sources = self.list_sources()
+    def save_item(self, source_id: int, title: str, link: str, content: str, mahra_score: int) -> bool:
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT INTO items (source_id, title, link, content, mahra_score)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (source_id, title, link, content, mahra_score))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
-        lines = [
+    def get_today_items(self):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT i.title, i.link, i.content, i.mahra_score, s.name as source_name
+                FROM items i
+                JOIN sources s ON i.source_id = s.id
+                WHERE date(i.published_at) = date('now')
+                ORDER BY i.id DESC
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def build_daily_report(self) -> str:
+        items = self.get_today_items()
+        sources = self.list_sources()
+        enabled_count = sum(1 for s in sources if s["enabled"])
+
+        report = [
             "🛰 <b>التقرير اليومي لرصد المهرة</b>",
-            f"📅 <b>التاريخ:</b> {datetime.now().strftime('%Y-%m-%d')}",
-            "",
-            f"📡 <b>المصادر النشطة:</b> {len(sources)}",
-            f"📰 <b>المواد المرصودة اليوم:</b> {len(rows)}",
-            "",
+            f"📡 <b>المصادر النشطة:</b> {enabled_count}",
+            f"📰 <b>المواد المرصودة اليوم:</b> {len(items)}\n",
             "━━━━━━━━━━━━━━━━━━━━",
             "🔴 <b>أبرز مستجدات المهرة المرصودة</b>",
-            "━━━━━━━━━━━━━━━━━━━━",
-            "",
+            "━━━━━━━━━━━━━━━━━━━━\n"
         ]
 
-        if not rows:
-            lines.append("لم يتم رصد أخبار أو مستجدات متعلقة بمحافظة المهرة اليوم.")
+        if not items:
+            report.append("لم يتم رصد أخبار أو مستجدات متعلقة بمحافظة المهرة اليوم.")
         else:
-            for i, row in enumerate(rows[:25], 1):
-                title = row["title"] or "خبر بدون عنوان"
-                lines.extend([
-                    f"{i}️⃣ <b>{title}</b>",
-                    f"   📍 <b>المصدر:</b> {row['source_name']}",
-                    f"   🔗 <a href='{row['url']}'>رابط الخبر</a>",
-                    "",
-                ])
+            for idx, item in enumerate(items, 1):
+                report.append(
+                    f"<b>{idx}. {item['title']}</b>\n"
+                    f"🔹 <b>المصدر:</b> {item['source_name']}\n"
+                    f"🔗 <a href='{item['link']}'>رابط الخبر</a>\n"
+                )
 
-        return "\n".join(lines)
+        return "\n".join(report)
