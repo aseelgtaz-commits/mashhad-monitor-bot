@@ -1,11 +1,10 @@
 import logging
-import re
 import aiohttp
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# قائمة الكلمات المفتاحية الشاملة لرصد أخبار المهرة وسقطرى (معدلة ومصححة)
+# قائمة الكلمات المفتاحية الشاملة لرصد أخبار المهرة وسقطرى
 MAHRA_KEYWORDS = [
     # --- المحافظة والمديريات ---
     "المهرة", "الغيطة", "حوف", "قشن", "سيحوت", 
@@ -63,18 +62,41 @@ class NewsMonitor:
 
     async def parse_source(self, session, source):
         url = source["url"]
-        
-        # تخطي روابط منصات التواصل الاجتماعي المباشرة لتجنب الحظر
-        if any(domain in url for domain in ["facebook.com", "x.com", "twitter.com", "instagram.com"]):
-            return
 
         html = await self.fetch_page(session, url)
         if not html:
             return
 
         soup = BeautifulSoup(html, "html.parser")
-        links = soup.find_all("a", href=True)
+        
+        # دعم قراءة روابط RSS/XML
+        items = soup.find_all(["item", "entry"])
+        if items:
+            for item in items:
+                title_node = item.find("title")
+                link_node = item.find(["link", "guid"])
+                
+                title = title_node.get_text(strip=True) if title_node else ""
+                link = link_node.get_text(strip=True) if link_node else url
+                if link_node and link_node.get("href"):
+                    link = link_node.get("href")
 
+                if not title:
+                    continue
+
+                score = self.calculate_score(title)
+                if score > 0:
+                    self.db.save_item(
+                        source_id=source["id"],
+                        title=title,
+                        link=link,
+                        content="",
+                        mahra_score=score
+                    )
+            return
+
+        # دعم قراءة الصفحات العادية
+        links = soup.find_all("a", href=True)
         for a in links:
             title = a.get_text(strip=True)
             link = a["href"]
@@ -96,7 +118,7 @@ class NewsMonitor:
                     mahra_score=score
                 )
                 if saved:
-                    logger.info(f"تم رصد خبر جديد [{title}] بكلمة مفتاحية تطابق المهرة.")
+                    logger.info(f"تم رصد خبر جديد: {title}")
 
     async def run_once(self, bot=None):
         logger.info("بدء جولة رصد الأخبار...")
