@@ -52,8 +52,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-db = Database()
-monitor = NewsMonitor(db)
+# محاولة الاتصال بقاعدة البيانات مع حماية
+try:
+  db = Database()
+  monitor = NewsMonitor(db)
+except Exception as e:
+  logger.error(f"DB Initialization Error: {e}")
+  db = None
+  monitor = None
 
 # ----------------------------------------------------
 # الأزرار واللوحات
@@ -118,11 +124,7 @@ async def welcome_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
           parse_mode="HTML",
       )
     except Exception:
-      await update.callback_query.message.reply_text(
-          welcome_text,
-          reply_markup=get_main_menu_keyboard(),
-          parse_mode="HTML",
-      )
+      pass
 
 
 async def handle_button_clicks(
@@ -132,6 +134,7 @@ async def handle_button_clicks(
   if not query:
     return
 
+  # الإجابة الفورية المباشرة للتليجرام لإيقاف مؤشر الانتظار فوراً
   try:
     await query.answer()
   except Exception as e:
@@ -140,18 +143,39 @@ async def handle_button_clicks(
   data = query.data
   logger.info(f"Button pressed: {data}")
 
-  try:
-    if data == "main_menu":
-      await welcome_user(update, context)
+  # 1. العودة للقائمة الرئيسية
+  if data == "main_menu":
+    await welcome_user(update, context)
+    return
 
-    elif data == "get_today_report":
+  # 2. اقتراح مصدر (لا يستدعي قاعدة البيانات - لا يسبب تعليق)
+  if data == "add_source_info":
+    add_text = (
+        "➕ <b>طلب إضافة مصدر جديد للشبكة</b>\n\n"
+        "لإدراج صحيفة، موقع، أو منصة إخبارية جديدة ضمن خطة الرصد التلقائي،"
+        " يرجى إرسال رابط المصدر المباشر للإدارة."
+    )
+    await query.edit_message_text(
+        add_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
+    )
+    return
+
+  # 3. الفحوصات التي تعتمد على قاعدة البيانات
+  if not db:
+    await query.edit_message_text(
+        "⚠️ قاعدة البيانات غير متصلة حالياً، يرجى التحقق من إعدادات الاتصال.",
+        reply_markup=get_back_keyboard(),
+    )
+    return
+
+  try:
+    if data == "get_today_report":
+      now_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d | %I:%M:%S %p")
       try:
         items = db.get_today_items()
-      except Exception as e:
-        logger.error(f"Error fetching today items: {e}")
+      except Exception as db_err:
+        logger.error(f"DB error: {db_err}")
         items = []
-
-      now_str = datetime.now(TIMEZONE).strftime("%Y-%m-%d | %I:%M:%S %p")
 
       if not items:
         report_msg = (
@@ -164,7 +188,8 @@ async def handle_button_clicks(
         report_msg = (
             f"📰 <b>الموجز الإخباري الخاص لليوم</b>\n"
             f"⏱ <b>تحديث:</b> <code>{now_str}</code>\n"
-            f"📊 <b>إجمالي الأحداث المرصودة:</b> <code>{len(items)}</code> خبر\n"
+            f"📊 <b>إجمالي الأحداث المرصودة:</b> <code>{len(items)}</code>"
+            " خبر\n"
             f"───────────────────\n\n"
         )
         for idx, item in enumerate(items, 1):
@@ -187,8 +212,8 @@ async def handle_button_clicks(
     elif data == "show_sources":
       try:
         sources = db.list_sources()
-      except Exception as e:
-        logger.error(f"Error fetching sources: {e}")
+      except Exception as db_err:
+        logger.error(f"DB error: {db_err}")
         sources = []
 
       sources_text = (
@@ -206,24 +231,14 @@ async def handle_button_clicks(
           sources_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
       )
 
-    elif data == "add_source_info":
-      add_text = (
-          "➕ <b>طلب إضافة مصدر جديد للشبكة</b>\n\n"
-          "لإدراج صحيفة، موقع، أو منصة إخبارية جديدة ضمن خطة الرصد"
-          " التلقائي، يرجى إرسال رابط المصدر المباشر للإدارة."
-      )
-      await query.edit_message_text(
-          add_text, reply_markup=get_back_keyboard(), parse_mode="HTML"
-      )
-
     elif data == "system_status":
       try:
         stats = db.dashboard_stats()
         sources_cnt = stats.get("sources", 0)
         enabled_cnt = stats.get("enabled_sources", 0)
         today_cnt = stats.get("items_today", 0)
-      except Exception as e:
-        logger.error(f"Error fetching stats: {e}")
+      except Exception as db_err:
+        logger.error(f"DB error: {db_err}")
         sources_cnt, enabled_cnt, today_cnt = 0, 0, 0
 
       status_text = (
@@ -238,10 +253,11 @@ async def handle_button_clicks(
       )
 
   except Exception as e:
-    logger.error(f"General button handler error: {e}")
+    logger.error(f"General callback handler error: {e}")
+
     try:
       await query.edit_message_text(
-          "⚠️ حدث خطأ أثناء تنفيذ الطلب، يرجى المحاولة مرة أخرى.",
+          "⚠️ تعذر استكمال الطلب حالياً، يرجى إعادة المحاولة.",
           reply_markup=get_back_keyboard(),
       )
     except Exception:
@@ -249,10 +265,11 @@ async def handle_button_clicks(
 
 
 async def run_periodic_monitoring():
-  try:
-    await monitor.run_once()
-  except Exception as e:
-    logger.error(f"خطأ أثناء دورة الرصد: {e}")
+  if monitor:
+    try:
+      await monitor.run_once()
+    except Exception as e:
+      logger.error(f"خطأ أثناء دورة الرصد: {e}")
 
 
 # ----------------------------------------------------
@@ -277,13 +294,12 @@ def main():
       )
   )
 
-  scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-  scheduler.add_job(run_periodic_monitoring, "interval", minutes=5)
-  scheduler.start()
+  if monitor:
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler.add_job(run_periodic_monitoring, "interval", minutes=5)
+    scheduler.start()
 
   logger.info("تم تشغيل البوت بنجاح...")
-
-  # مسح أي جلسات قديمة متراكمة تجنباً للـ Conflict
   app.run_polling(drop_pending_updates=True)
 
 
