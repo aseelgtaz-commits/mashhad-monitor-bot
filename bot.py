@@ -15,8 +15,7 @@ from telegram.ext import (
 )
 
 from database import Database
-from monitor import Monitor
-
+from monitor import NewsMonitor
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -46,9 +45,25 @@ def is_admin(update: Update) -> bool:
 
 async def denied(update: Update):
     if update.effective_message:
-        await update.effective_message.reply_text(
-            "⛔ هذا الأمر متاح للمشرفين فقط."
-        )
+        await update.effective_message.reply_text("⛔ هذا الأمر متاح للمشرفين فقط.")
+
+
+async def send_split_message(context: ContextTypes.DEFAULT_TYPE, chat_id: str, text: str, max_length: int = 4000):
+    """تقسيم الرسائل لتجنب خطأ Message is too long"""
+    if len(text) <= max_length:
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", disable_web_page_preview=True)
+        return
+
+    lines = text.split("\n")
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > max_length:
+            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
+            chunk = line + "\n"
+        else:
+            chunk += line + "\n"
+    if chunk.strip():
+        await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -57,7 +72,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stats = db.dashboard_stats()
-
     keyboard = [
         [
             InlineKeyboardButton("➕ إضافة مصدر", callback_data="add_help"),
@@ -65,13 +79,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("📊 تقرير اليوم", callback_data="report"),
-            InlineKeyboardButton("🔴 مشاكل المصادر", callback_data="errors"),
         ],
     ]
 
     text = (
-        "🛰 *مرحباً بك في Mashhad Monitor*\n\n"
-        "نظام رصد ومتابعة للمصادر والأخبار والمستجدات.\n\n"
+        "🛰 <b>مرحباً بك في Mashhad Monitor</b>\n\n"
+        "نظام رصد ومتابعة إخباري متخصص في محافظة المهرة.\n\n"
         f"📡 المصادر: {stats['sources']}\n"
         f"🟢 النشطة: {stats['enabled_sources']}\n"
         f"📰 مواد اليوم: {stats['items_today']}\n"
@@ -80,9 +93,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
@@ -92,17 +103,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "📚 *مساعدة Mashhad Monitor*\n\n"
-        "➕ إضافة مصدر:\n"
-        "`/add اسم المصدر | الرابط`\n\n"
-        "📡 عرض المصادر:\n"
-        "`/sources`\n\n"
-        "🗑 حذف مصدر:\n"
-        "`/remove رقم_المصدر`\n\n"
-        "📊 التقرير:\n"
-        "`/report`\n\n"
-        "سيتم لاحقاً توسيع لوحة التحكم والأزرار.",
-        parse_mode="Markdown",
+        "📚 <b>مساعدة Mashhad Monitor</b>\n\n"
+        "➕ إضافة مصدر:\n<code>/add اسم المصدر | الرابط</code>\n\n"
+        "📡 عرض المصادر:\n<code>/sources</code>\n\n"
+        "🗑 حذف مصدر:\n<code>/remove رقم_المصدر</code>\n\n"
+        "📊 التقرير:\n<code>/report</code>",
+        parse_mode="HTML",
     )
 
 
@@ -115,9 +121,8 @@ async def add_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if "|" not in text:
         await update.message.reply_text(
-            "➕ أرسل المصدر بهذا الشكل:\n\n"
-            "`/add اسم المصدر | https://example.com`",
-            parse_mode="Markdown",
+            "➕ أرسل المصدر بهذا الشكل:\n<code>/add اسم المصدر | https://example.com</code>",
+            parse_mode="HTML",
         )
         return
 
@@ -129,22 +134,15 @@ async def add_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         source_id = db.add_source(name, url)
+        await update.message.reply_text(
+            f"✅ <b>تمت إضافة المصدر</b>\n\n📡 {name}\n🔗 {url}\n🆔 {source_id}",
+            parse_mode="HTML",
+        )
     except ValueError as exc:
         await update.message.reply_text(f"⚠️ {exc}")
-        return
     except Exception:
         logger.exception("Failed to add source")
         await update.message.reply_text("❌ حدث خطأ أثناء حفظ المصدر.")
-        return
-
-    await update.message.reply_text(
-        "✅ *تمت إضافة المصدر*\n\n"
-        f"📡 {name}\n"
-        f"🔗 {url}\n"
-        f"🆔 {source_id}\n\n"
-        "سيتم إدخاله في دورة الرصد القادمة.",
-        parse_mode="Markdown",
-    )
 
 
 async def sources(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -153,22 +151,16 @@ async def sources(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rows = db.list_sources()
-
     if not rows:
         await update.message.reply_text("📡 لا توجد مصادر مضافة حالياً.")
         return
 
-    lines = ["📡 *المصادر المضافة*", ""]
+    lines = ["📡 <b>المصادر المضافة</b>\n"]
     for index, row in enumerate(rows, 1):
         status = "🟢 نشط" if row["enabled"] else "⏸ متوقف"
-        error = f"\n   ⚠️ {row['last_error']}" if row["last_error"] else ""
-        lines.append(
-            f"{index}. *{row['name']}*\n"
-            f"   {status}\n"
-            f"   🔗 {row['url']}{error}"
-        )
+        lines.append(f"{index}. <b>{row['name']}</b>\n   {status}\n   🔗 {row['url']}")
 
-    await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def remove_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -177,26 +169,20 @@ async def remove_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.partition(" ")[2].strip()
-
     try:
         number = int(text)
     except ValueError:
-        await update.message.reply_text("استخدم: `/remove 1`", parse_mode="Markdown")
+        await update.message.reply_text("استخدم: <code>/remove 1</code>", parse_mode="HTML")
         return
 
     rows = db.list_sources()
-
     if number < 1 or number > len(rows):
         await update.message.reply_text("❌ رقم المصدر غير صحيح.")
         return
 
     row = rows[number - 1]
     db.remove_source(row["id"])
-
-    await update.message.reply_text(
-        f"🗑 تم حذف المصدر: *{row['name']}*",
-        parse_mode="Markdown",
-    )
+    await update.message.reply_text(f"🗑 تم حذف المصدر: <b>{row['name']}</b>", parse_mode="HTML")
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,7 +191,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     report = db.build_daily_report()
-    await update.message.reply_text(report, parse_mode="Markdown")
+    await send_split_message(context, str(update.effective_chat.id), report)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,23 +203,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "add_help":
-        await query.edit_message_text(
-            "➕ أرسل:\n\n`/add اسم المصدر | https://example.com`",
-            parse_mode="Markdown",
-        )
+        await query.edit_message_text("➕ أرسل:\n<code>/add اسم المصدر | https://example.com</code>", parse_mode="HTML")
     elif query.data == "sources":
         await sources(update, context)
     elif query.data == "report":
         await report_command(update, context)
-    elif query.data == "errors":
-        rows = db.sources_with_errors()
-        if not rows:
-            await query.edit_message_text("🟢 لا توجد مصادر بها أخطاء مسجلة.")
-            return
-        text = "🔴 *مصادر بها أخطاء*\n\n" + "\n\n".join(
-            f"• *{r['name']}*\n{r['last_error']}" for r in rows
-        )
-        await query.edit_message_text(text, parse_mode="Markdown")
 
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
@@ -246,15 +220,9 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE):
     report = db.build_daily_report()
-
-    # The report is intentionally sent to the configured channel.
     if CHANNEL_ID:
         try:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=report,
-                parse_mode="Markdown",
-            )
+            await send_split_message(context, CHANNEL_ID, report)
             logger.info("Daily report sent to channel")
         except Exception:
             logger.exception("Failed to send daily report to channel")
@@ -294,10 +262,10 @@ def main():
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    monitor = Monitor(db)
+    monitor = NewsMonitor(db, channel_id=CHANNEL_ID)
     app.bot_data["monitor"] = monitor
 
-    # Monitor every N seconds.
+    # فحص دوري كل N من الثواني
     app.job_queue.run_repeating(
         monitor_job,
         interval=CHECK_INTERVAL,
@@ -305,7 +273,7 @@ def main():
         name="source-monitor",
     )
 
-    # Daily report at 00:00 Asia/Aden.
+    # تقرير يومي الساعة 00:00 بتوقيت اليمن
     app.job_queue.run_daily(
         daily_report_job,
         time=time(REPORT_HOUR, REPORT_MINUTE, tzinfo=TIMEZONE),
@@ -313,12 +281,6 @@ def main():
     )
 
     logger.info("Mashhad Monitor is starting...")
-    logger.info("Timezone: %s", TIMEZONE)
-    logger.info("Check interval: %s seconds", CHECK_INTERVAL)
-    logger.info("Daily report: %02d:%02d", REPORT_HOUR, REPORT_MINUTE)
-
-    # One Render service / one polling process must use this bot token.
-    asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling(drop_pending_updates=True)
 
 
