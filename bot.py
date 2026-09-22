@@ -1,3 +1,6 @@
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 from datetime import datetime
 import pytz
@@ -12,10 +15,31 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ضبط التوقيت المحلي (اليمن / مكة المكرمة)
+# ----------------------------------------------------
+# 0. سيرفر وهمي لتجاوز فحص Port في Render المجاني
+# ----------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        return  # إخفاء سجلات الطلبات العادية للحفاظ على نظافة الـ Logs
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# تشغيل السيرفر الوهمي في مسار خلفي (Thread)
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+# ----------------------------------------------------
+# ضبط التوقيت المحلي والإعدادات
+# ----------------------------------------------------
 TIMEZONE = pytz.timezone('Asia/Riyadh')
 
-# إعداد السجلات
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -23,11 +47,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------
-# 1. قاعدة بيانات/قائمة وهمية كمثال لربطها ببرنامج الرصد لديك
+# 1. قاعدة بيانات/قائمة وهمية للأخبار
 # ----------------------------------------------------
-# يفترض أن نظام الرصد يضع الأخبار هنا مع التاريخ الدقيق كـ datetime
 news_database = [
-    # مثال لخبر نُشر اليوم
     {
         "title": "محافظ المهرة يلتقي بقادة الأجهزة الأمنية لمتابعة الأوضاع",
         "source": "قناة المهرية",
@@ -44,10 +66,9 @@ sources_list = [
 ]
 
 # ----------------------------------------------------
-# 2. لوحات الأزرار التفاعلية (Keyboards)
+# 2. لوحات الأزرار التفاعلية
 # ----------------------------------------------------
 def get_main_menu_keyboard():
-    """لوحة التحكم الرئيسية التفاعلية"""
     keyboard = [
         [
             InlineKeyboardButton("📊 تقرير الأخبار الآنية", callback_data="get_today_report"),
@@ -61,40 +82,32 @@ def get_main_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_back_keyboard():
-    """زر للعودة للقائمة الرئيسية"""
     keyboard = [[InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="main_menu")]]
     return InlineKeyboardMarkup(keyboard)
 
 # ----------------------------------------------------
-# 3. دالة فلترة الأخبار لليوم الحالي حصراً
+# 3. فلترة الأخبار
 # ----------------------------------------------------
 def get_today_news_filtered():
-    """
-    تجلب الأخبار المنشورة اليوم فقط ابتداءً من 00:00:00 وحتى هذه اللحظة بالثانية
-    """
     now = datetime.now(TIMEZONE)
     start_of_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
     today_news = []
     for news in news_database:
         news_time = news['timestamp']
-        # التأكد من التوقيت
         if news_time.tzinfo is None:
             news_time = TIMEZONE.localize(news_time)
             
-        # شرط الفلترة: من بداية اليوم وحتى اللحظة الحالية
         if start_of_today <= news_time <= now:
             today_news.append(news)
             
     return today_news, now
 
 # ----------------------------------------------------
-# 4. رسائل الترحيب والاستجابة للكلمات
+# 4. رسائل الترحيب والردود
 # ----------------------------------------------------
 async def welcome_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الرد الترحيبي المنظم والمبهج"""
     user_name = update.effective_user.first_name
-    
     welcome_text = (
         f"✨ **أهلاً وسهلاً بك عزيزي {user_name}!** 👋\n\n"
         f"🤖 أنا **بوت رصد ومتابعة الأخبار الآنية**.\n"
@@ -116,19 +129,17 @@ async def welcome_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ----------------------------------------------------
-# 5. معالجة الضغط على الأزرار (Callback Handlers)
+# 5. معالجة معالجات الأزرار
 # ----------------------------------------------------
 async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     data = query.data
     
     if data == "main_menu":
         await welcome_user(update, context)
         
     elif data == "get_today_report":
-        # جلب تقرير اليوم الفوري
         news_list, request_time = get_today_news_filtered()
         time_str = request_time.strftime("%Y-%m-%d | %I:%M:%S %p")
         
@@ -200,10 +211,9 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 # ----------------------------------------------------
-# 6. التقرير التلقائي اليومي (الساعة 23:59 ليلاً)
+# 6. التقرير اليومي
 # ----------------------------------------------------
 async def send_daily_nightly_report(app):
-    """إرسال التقرير النهائي اليومي عند الساعة 12:00 ليلاً"""
     news_list, request_time = get_today_news_filtered()
     date_str = request_time.strftime("%Y-%m-%d")
     
@@ -218,27 +228,22 @@ async def send_daily_nightly_report(app):
             item_time = item['timestamp'].strftime("%I:%M %p")
             report_msg += f"{idx}. **{item['title']}** ({item['source']} - `{item_time}`)\n"
 
-    # ضع هنا ID الشات أو القناة التي ترغب بإرسال التقرير النهائي لها
-    # await app.bot.send_message(chat_id="CHAT_ID_HERE", text=report_msg, parse_mode="Markdown")
     logger.info("تم تجهيز وإرسال التقرير اليومي النهائي بنجاح.")
 
 # ----------------------------------------------------
-# 7. التشغيل المباشر للبوت
+# 7. تشغيل البوت
 # ----------------------------------------------------
 def main():
     BOT_TOKEN = "8949984502:AAHusXsa6M-fZ3J-fIKQD1U4-Rnu0GgmSKo"
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # كلمات التحية للتعرف عليها تلقائياً
     greeting_patterns = r"^(مرحبا|مرحباً|السلام عليكم|سلام|هلو|أهلا|اهلا|hello|hi)$"
 
-    # الأوامر والرسائل
     app.add_handler(CommandHandler("start", welcome_user))
     app.add_handler(CommandHandler("report", welcome_user))
     app.add_handler(MessageHandler(filters.Regex(greeting_patterns) | filters.TEXT & ~filters.COMMAND, welcome_user))
     app.add_handler(CallbackQueryHandler(handle_button_clicks))
 
-    # ضبط جدولة التقرير اليومي النهائي 11:59 ليلاً
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(
         send_daily_nightly_report,
@@ -249,7 +254,7 @@ def main():
     )
     scheduler.start()
 
-    logger.info("تم تشغيل البوت بنجاح...")
+    logger.info("تم تشغيل البوت والسيرفر بنجاح...")
     app.run_polling()
 
 if __name__ == "__main__":
