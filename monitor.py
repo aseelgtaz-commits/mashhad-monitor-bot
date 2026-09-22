@@ -16,7 +16,6 @@ class NewsMonitor:
     async def fetch_rss_feed(self, url: str) -> List[Dict[str, Any]]:
         """جلب وتحليل تغذية RSS مع timeout آمن."""
         try:
-            # استخدام run_in_executor لمنع تجميد event loop أثناء الجلب
             loop = asyncio.get_event_loop()
             feed = await loop.run_in_executor(None, feedparser.parse, url)
             
@@ -51,11 +50,9 @@ class NewsMonitor:
                 # 1. تطبيق فلتر المهرة (Mahra Relevance Filter)
                 score, matched = calculate_mahra_score(title, content)
                 if score < SCORE_THRESHOLD:
-                    # الخبر لا يتعلق بالمهرة - يتجاهل النظام الخبر
                     continue
 
-                # 2. التحقق من منع التكرار بواسطة قاعدة البيانات
-                # افترضنا أن دالة save_item تعيد True إذا كان الخبر جديداً وتم حفظه
+                # 2. التحقق من منع التكرار وحفظ الخبر
                 is_new = self.db.save_item(
                     source_id=source_id,
                     title=title,
@@ -94,4 +91,7 @@ class NewsMonitor:
             except Exception as e:
                 logger.error(f"فشلت معالجة المصدر [{name}] لكن استمرت الدورة: {e}")
                 
-        logger.info("كتملت دورة رصد المصادر بنجاح.")
+        logger.info("اكتملت دورة رصد المصادر بنجاح.")
+
+# الاسم المستعار لتفادي أخطاء الاستيراد مع الكود القديم
+Monitor = NewsMonitor
