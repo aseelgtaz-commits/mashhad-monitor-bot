@@ -1,9 +1,34 @@
 [
-  {"name": "موقع المهرة خبور", "url": "https://almahrahkhboor.net/section/news"},
-  {"name": "موقع المهرية نت", "url": "https://almahriah.net"},
-  {"name": "موقع عين المهرة", "url": "https://ainalmahrah.com/cat9.html"},
-  {"name": "موقع المهرة نيوز", "url": "https://almahranews.com"},
-  {"name": "موقع المهرة اونلاين", "url": "https://almahrahonline.net"},
-  {"name": "موقع الموقع بوست", "url": "https://almawqeapost.net/city/10"},
-  {"name": "موقع محافظة المهرة", "url": "https://almahrahgov.com"}
+  {
+    "name": "أبو أيهم المهري (RSS)",
+    "url": "https://rss.app/feeds/ofDNjDV39HPl1dhc.xml"
+  },
+  {
+    "name": "موقع المهرة خبور",
+    "url": "https://almahrahkhboor.net/section/news"
+  },
+  {
+    "name": "موقع المهرية نت",
+    "url": "https://almahriah.net"
+  },
+  {
+    "name": "موقع عين المهرة",
+    "url": "https://ainalmahrah.com/cat9.html"
+  },
+  {
+    "name": "موقع المهرة نيوز",
+    "url": "https://almahranews.com"
+  },
+  {
+    "name": "موقع المهرة اونلاين",
+    "url": "https://almahrahonline.net"
+  },
+  {
+    "name": "موقع الموقع بوست",
+    "url": "https://almawqeapost.net/city/10"
+  },
+  {
+    "name": "موقع محافظة المهرة",
+    "url": "https://almahrahgov.com"
+  }
 ]
