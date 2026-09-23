@@ -1,38 +1,47 @@
 [
   {
+    "id": "abu_ayham",
     "name": "أبو أيهم المهري",
-    "page_url": "https://www.facebook.com/profile.php?id=100084401507152",
-    "rss_url": "https://rss.app/feeds/ofDNjDV39HPl1dhc.xml",
+    "source_url": "https://www.facebook.com/profile.php?id=100084401507152",
+    "feed_url": "https://rss.app/feeds/ofDNjDV39HPl1dhc.xml",
+    "feed_env": "RSS_FEED_ABU_AYHAM",
     "enabled": true,
     "accept_all": true
   },
   {
+    "id": "suleiman_aljadhi",
     "name": "سليمان الجدحي",
-    "page_url": "https://www.facebook.com/slyman.aljdhy",
-    "rss_url": "",
+    "source_url": "https://www.facebook.com/slyman.aljdhy",
+    "feed_url": "",
+    "feed_env": "RSS_FEED_SULEIMAN_ALJADHI",
     "enabled": true,
     "accept_all": true
   },
   {
+    "id": "mohammed_raoian",
     "name": "محمد عوض رعيان",
-    "page_url": "https://www.facebook.com/mhmd.wd.r.yan.alkthyry",
-    "rss_url": "",
+    "source_url": "https://www.facebook.com/mhmd.wd.r.yan.alkthyry",
+    "feed_url": "",
+    "feed_env": "RSS_FEED_MOHAMMED_RAOIAN",
     "enabled": true,
     "accept_all": true
   },
   {
+    "id": "mahra_media_center",
     "name": "مركز المهرة الإعلامي",
-    "page_url": "https://www.facebook.com/mcalmahrah",
-    "rss_url": "",
+    "source_url": "https://www.facebook.com/mcalmahrah",
+    "feed_url": "",
+    "feed_env": "RSS_FEED_MAHRA_MEDIA_CENTER",
     "enabled": true,
     "accept_all": true
   },
   {
+    "id": "madar_almahrah",
     "name": "منصة مدار المهرة",
-    "page_url": "https://www.facebook.com/madaralmahrh",
-    "rss_url": "",
+    "source_url": "https://www.facebook.com/madaralmahrh",
+    "feed_url": "",
+    "feed_env": "RSS_FEED_MADAR_ALMAHRAH",
     "enabled": true,
     "accept_all": true
   }
 ]
-
